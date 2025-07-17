@@ -41,6 +41,8 @@ class Scope:
     symbols: Dict[str, 'Symbol'] = field(default_factory=dict)  # 在此作用域内直接定义的符号
     parent: Optional['Scope'] = None  # 指向父作用域
     module_path: Optional[Path] = None  # 仅用于模块作用域
+    nonlocal_vars: Set[str] = field(default_factory=set)  # nonlocal声明的变量
+    global_vars: Set[str] = field(default_factory=set)  # global声明的变量
 
 
 @dataclass
@@ -98,6 +100,17 @@ class ContextAwareVisitor(ast.NodeVisitor):
         """从作用域栈解析名称（LEGB规则）"""
         scope = from_scope or self.current_scope()
         
+        # 检查是否有 nonlocal 或 global 声明
+        if scope:
+            if name in scope.nonlocal_vars:
+                # nonlocal 变量 - 跳过当前作用域，从父作用域开始查找
+                scope = scope.parent
+            elif name in scope.global_vars:
+                # global 变量 - 直接跳到模块作用域
+                while scope and scope.scope_type != 'module':
+                    scope = scope.parent
+        
+        # 正常的LEGB查找
         while scope:
             if name in scope.symbols:
                 return scope.symbols[name]
@@ -723,6 +736,22 @@ class ContextAwareVisitor(ast.NodeVisitor):
             dependencies.update(deps)
             
         return dependencies
+    
+    def visit_Nonlocal(self, node: ast.Nonlocal):
+        """处理nonlocal声明"""
+        current = self.current_scope()
+        if current and current.scope_type == 'function':
+            for name in node.names:
+                current.nonlocal_vars.add(name)
+        return node
+    
+    def visit_Global(self, node: ast.Global):
+        """处理global声明"""
+        current = self.current_scope()
+        if current:
+            for name in node.names:
+                current.global_vars.add(name)
+        return node
 
 
 class AdvancedCodeMerger:
@@ -1005,9 +1034,13 @@ class AdvancedNodeTransformer(ast.NodeTransformer):
         if self.current_scope_stack:
             return self.current_scope_stack[0].module_path
         return None
+    
+    def current_module_path(self) -> Optional[Path]:
+        """获取当前模块路径 - 兼容原始代码"""
+        return self.get_current_module_path()
         
-    def find_symbol_qname(self, name: str) -> Optional[str]:
-        """查找符号的限定名"""
+    def resolve_name_to_symbol(self, name: str) -> Optional[Symbol]:
+        """解析名称到符号对象"""
         current_module = self.get_current_module_path()
         
         # 首先查找当前模块中的符号
@@ -1018,21 +1051,25 @@ class AdvancedNodeTransformer(ast.NodeTransformer):
             # 1. 检查是否是模块内定义的符号
             test_qname = f"{module_qname}.{name}"
             if test_qname in self.all_symbols:
-                return test_qname
+                return self.all_symbols[test_qname]
                 
             # 2. 检查是否是导入的别名
             if current_module in self.visitor.module_symbols:
                 module_syms = self.visitor.module_symbols[current_module]
                 if name in module_syms and isinstance(module_syms[name], Symbol):
-                    sym = module_syms[name]
-                    if sym.symbol_type == 'import_alias':
-                        if sym.dependencies:
-                            # 返回导入指向的真实符号的qname
-                            for dep in sym.dependencies:
-                                return dep.qname
-                        # 如果没有依赖，返回自己的qname
-                        return sym.qname
+                    return module_syms[name]
                     
+        return None
+        
+    def find_symbol_qname(self, name: str) -> Optional[str]:
+        """查找符号的限定名 - 保留用于向后兼容"""
+        symbol = self.resolve_name_to_symbol(name)
+        if symbol:
+            if symbol.symbol_type == 'import_alias' and symbol.dependencies:
+                # 返回导入指向的真实符号的qname
+                for dep in symbol.dependencies:
+                    return dep.qname
+            return symbol.qname
         return None
         
     def transform_all_assignment(self, node: ast.Assign, symbol: Symbol) -> ast.AST:
@@ -1136,9 +1173,52 @@ class AdvancedNodeTransformer(ast.NodeTransformer):
                 node.id = self.name_mappings[qname]
         return node
         
-    def visit_Attribute(self, node: ast.Attribute):
+    def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
         """转换属性访问"""
-        # 暂时只处理简单的属性访问
+        # 递归解析属性链，直到找到最左侧的根符号
+        # 例如，对于 a.b.c，我们先解析 a
+        # 这是一个简化的实现，只处理单层 a.b
+        
+        # 1. 解析 node.value (例如 global_same_a)
+        if not isinstance(node.value, ast.Name):
+            # 无法处理更复杂的情况，如 (get_obj()).attr，先保持原样
+            return self.generic_visit(node)
+        
+        base_name = node.value.id
+        # 2. 找到基名对应的符号 (global_same_a -> import_alias 符号)
+        base_symbol = self.resolve_name_to_symbol(base_name)
+        
+        if not base_symbol:
+            # 基名无法解析，保持原样
+            return self.generic_visit(node)
+            
+        # 3. 找到别名指向的真实符号 (import_alias -> module 符号)
+        # 这需要确保在分析阶段，import_alias 的依赖被正确设置
+        target_symbol = None
+        if base_symbol.symbol_type == 'import_alias':
+            # 假设别名只有一个依赖，即其指向的模块或符号
+            if base_symbol.dependencies:
+                target_symbol = next(iter(base_symbol.dependencies))
+        else:
+            # 如果基名不是别名，而是普通变量，它可能是一个对象实例
+            # 暂时不处理这种情况，但这是未来扩展的方向
+            target_symbol = base_symbol
+            
+        if not target_symbol:
+            return self.generic_visit(node)
+            
+        # 4. 在真实符号的作用域中查找属性 (在 module 'a_pkg.a' 中查找 'hello2')
+        # 这要求 target_symbol 必须有一个指向其作用域的链接
+        if target_symbol.scope and node.attr in target_symbol.scope.symbols:
+            final_symbol = target_symbol.scope.symbols[node.attr]
+            
+            # 5. 获取最终符号的重命名
+            if final_symbol.qname in self.name_mappings:
+                new_name = self.name_mappings[final_symbol.qname]
+                # 6. 将整个 ast.Attribute 节点替换为ast.Name节点
+                return ast.Name(id=new_name, ctx=node.ctx)
+                
+        # 如果以上步骤失败，保持原样
         return self.generic_visit(node)
         
     def visit_Global(self, node: ast.Global):
@@ -1146,14 +1226,18 @@ class AdvancedNodeTransformer(ast.NodeTransformer):
         # Global声明的名称通常不需要转换，因为它们引用的是模块级名称
         # 但我们仍然需要检查是否有映射
         new_names = []
-        for name in node.names:
-            # 查找模块级符号
-            module_qname = self.visitor.get_module_qname(self.current_module_path)
-            symbol_qname = f"{module_qname}.{name}"
-            if symbol_qname in self.name_mappings:
-                new_names.append(self.name_mappings[symbol_qname])
-            else:
-                new_names.append(name)
+        current_module = self.get_current_module_path()
+        if current_module:
+            for name in node.names:
+                # 查找模块级符号
+                module_qname = self.visitor.get_module_qname(current_module)
+                symbol_qname = f"{module_qname}.{name}"
+                if symbol_qname in self.name_mappings:
+                    new_names.append(self.name_mappings[symbol_qname])
+                else:
+                    new_names.append(name)
+        else:
+            new_names = node.names
         node.names = new_names
         return node
         
