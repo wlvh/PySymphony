@@ -26,17 +26,25 @@ This is a Python code merging tool project that implements utilities for flatten
     ├── my_scripts.py        # Main demo script that imports from both packages
     ├── test_issues.py       # Test script for smart renaming and ordering
     ├── test_complex.py      # Test script for complex dependencies
-    └── ultimate_merge.py    # ✅ WORKING code merger with smart features
+    ├── ultimate_merge.py    # ✅ WORKING code merger with smart features
+    └── advanced_merge.py    # 🆕 Enhanced merger with AST-based analysis
 ```
 
 ## Key Components
 
-### ✅ Advanced Code Merger Tool
-- **`scripts/ultimate_merge.py`**: The enhanced implementation with intelligent features:
+### ✅ Code Merger Tools
+- **`scripts/ultimate_merge.py`**: The first enhanced implementation with intelligent features:
   - **Smart renaming**: Only renames functions when there are actual conflicts
   - **Dependency ordering**: Uses topological sort to ensure correct function definition order
   - **Complete dependency resolution**: Recursively finds all required functions
   - **Import alias handling**: Correctly processes all import variations
+
+- **`scripts/advanced_merge.py`**: The latest implementation with comprehensive AST analysis:
+  - **Advanced scope analysis**: Full LEGB (Local, Enclosing, Global, Built-in) scope resolution
+  - **Symbol tracking**: Comprehensive tracking of all Python symbols (functions, classes, variables)
+  - **Enhanced attribute resolution**: Supports nested attribute chains (e.g., `a.b.c.d`)
+  - **Correct nonlocal/global handling**: Properly tracks and preserves scope declarations
+  - **Import alias mapping**: Complete support for all import patterns and aliases
 
 ### Demo Code
 - **`a_pkg/a.py`**: Contains `global_same()`, `hello()`, `hello2()` - demonstrates internal dependencies
@@ -47,6 +55,7 @@ This is a Python code merging tool project that implements utilities for flatten
 - **`test_pkg/unique_func.py`**: Functions with unique names that shouldn't be renamed
 - **`test_pkg/order_test.py`**: Multi-level dependencies to test correct ordering
 - **`test_pkg/complex_deps.py`**: Complex dependency chains for advanced testing
+- **`test_issue3_fixes.py`**: Comprehensive tests for issue #3 fixes in advanced_merge.py
 
 ## Development Commands
 
@@ -56,13 +65,14 @@ This project lacks standard Python configuration files (no requirements.txt, set
 # Run the main demo script (requires PYTHONPATH)
 PYTHONPATH=. python scripts/my_scripts.py
 
-# Run the code merger tool
+# Run the code merger tools
 python scripts/ultimate_merge.py scripts/my_scripts.py .
+python scripts/advanced_merge.py scripts/my_scripts.py .
 ```
 
-## ✅ Advanced Code Merger Tool
+## ✅ Ultimate Merge Tool
 
-**`scripts/ultimate_merge.py`** is the enhanced implementation with intelligent features:
+**`scripts/ultimate_merge.py`** is the first enhanced implementation with intelligent features:
 
 ### Core Features
 - **✅ Complete dependency resolution**: Recursively finds all required functions across modules
@@ -227,23 +237,62 @@ def main_handler(data):       # Level 4: Depends on processor & formatter
     return f'main[{processed}, {formatted}]'
 ```
 
+## 🆕 Advanced Merge Tool
+
+**`scripts/advanced_merge.py`** is the latest implementation with comprehensive AST-based analysis:
+
+### Enhanced Features
+- **Advanced Scope Analysis**: Full LEGB (Local, Enclosing, Global, Built-in) scope resolution
+- **Comprehensive Symbol Tracking**: Tracks all Python symbols including:
+  - Functions (regular and async)
+  - Classes
+  - Variables (module-level, local, parameters)
+  - Import aliases
+  - Loop variables and comprehension scopes
+- **Enhanced Attribute Resolution**: 
+  - Supports nested attribute chains (e.g., `a.b.c.d`)
+  - Correctly handles import aliases in attribute access
+- **Proper Scope Declarations**:
+  - Correctly tracks and preserves `nonlocal` and `global` declarations
+  - Avoids overwriting declared nonlocal/global variables
+- **Import Alias Mapping**: Complete support for all import patterns
+
+### Recent Fixes (Issue #3)
+1. **TypeError Fix**: Corrected `current_module_path` method call
+2. **Nested Attribute Access**: Full support for deep attribute chains
+3. **Scope Preservation**: Proper handling of nonlocal/global variables
+4. **Import Mapping**: Enhanced resolution of imported symbols
+
+### Usage
+```bash
+python scripts/advanced_merge.py <script_path> <project_root>
+# Output: <script_name>_advanced_merged.py
+```
+
 ## Development Environment
 
 - **Language**: Python 3 (no external dependencies required)
 - **IDE**: IntelliJ IDEA/PyCharm (`.idea/` directory present)
-- **Git**: Not a git repository
+- **Git**: Git repository with GitHub integration
 - **Dependencies**: Uses only Python standard library (`ast`, `pathlib`, `typing`)
 
 ## Key Features Summary
 
-The `ultimate_merge.py` tool successfully implements all advanced features:
-
+### Ultimate Merge (`ultimate_merge.py`)
 ✅ **Smart Renaming**: Only renames conflicting functions, preserving unique names
 ✅ **Dependency Ordering**: Uses topological sort for correct function definition order  
 ✅ **Source Tracking**: Comments show original file location for each function
 ✅ **Import Alias Handling**: Correctly processes `import X as Y` patterns
 ✅ **Minimal Code**: Only includes actually used functions
 ✅ **Perfect Output**: Merged scripts produce identical output to originals
+
+### Advanced Merge (`advanced_merge.py`)
+✅ **All features from Ultimate Merge** plus:
+✅ **Full Scope Analysis**: Complete LEGB scope resolution
+✅ **Variable Tracking**: Tracks all variable types and scopes
+✅ **Deep Attribute Resolution**: Handles complex nested attributes
+✅ **Scope Declaration Preservation**: Maintains nonlocal/global semantics
+✅ **Enhanced Symbol Resolution**: More robust handling of complex imports
 
 ## Project Purpose
 
