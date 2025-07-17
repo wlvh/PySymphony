@@ -48,7 +48,7 @@ class Symbol:
     """统一的符号模型"""
     name: str                 # 原始名称, e.g., 'hello'
     qname: str                # 全局限定名, e.g., 'a_pkg.a.hello'
-    symbol_type: str          # 'function', 'class', 'variable', 'import_alias', 'parameter'
+    symbol_type: str          # 'function', 'class', 'variable', 'import_alias', 'parameter', 'loop_var', 'local_var'
     def_node: ast.AST         # 定义此符号的AST节点
     scope: Scope              # 定义此符号的作用域
     dependencies: Set['Symbol'] = field(default_factory=set)  # 此符号依赖的其他符号
@@ -56,6 +56,7 @@ class Symbol:
     is_nested: bool = False   # 是否是嵌套函数/类
     decorators: List['Symbol'] = field(default_factory=list)  # 装饰器符号
     init_statements: List[ast.AST] = field(default_factory=list)  # 模块级初始化语句
+    export_list: List[str] = field(default_factory=list)  # __all__ 的导出列表
 
     def __hash__(self):
         return hash((self.qname, id(self.scope)))
@@ -332,10 +333,6 @@ class ContextAwareVisitor(ast.NodeVisitor):
         # 检查是否是嵌套函数
         is_nested = any(s.scope_type == 'function' for s in self.scope_stack)
         
-        # 如果是嵌套函数，不需要创建符号（会在父函数中处理）
-        if is_nested:
-            return
-        
         # 创建函数符号
         parent_qname = ""
         if self.current_scope().scope_type == 'module':
@@ -349,6 +346,15 @@ class ContextAwareVisitor(ast.NodeVisitor):
             )
             if class_symbol:
                 parent_qname = class_symbol.qname
+        elif self.current_scope().scope_type == 'function':
+            # 嵌套函数
+            parent_func = next(
+                (s for s in self.all_symbols.values()
+                 if s.def_node == self.current_scope().node),
+                None
+            )
+            if parent_func:
+                parent_qname = parent_func.qname
                 
         qname = f"{parent_qname}.{node.name}" if parent_qname else node.name
         
@@ -363,11 +369,11 @@ class ContextAwareVisitor(ast.NodeVisitor):
         
         # 处理装饰器
         for decorator in node.decorator_list:
-            decorator_symbols = self.collect_dependencies_from_node(decorator)
+            decorator_symbols = self.analyze_dependencies(decorator)
             symbol.decorators.extend(decorator_symbols)
             symbol.dependencies.update(decorator_symbols)
             
-        # 注册符号
+        # 注册符号（无论是否嵌套）
         self.current_scope().symbols[node.name] = symbol
         self.all_symbols[qname] = symbol
         
@@ -379,8 +385,10 @@ class ContextAwareVisitor(ast.NodeVisitor):
         )
         self.push_scope(func_scope)
         
-        # 处理参数
-        for arg in node.args.args:
+        # 处理所有参数类型
+        args = node.args
+        # 位置参数
+        for arg in args.args:
             param_symbol = Symbol(
                 name=arg.arg,
                 qname=f"{qname}.{arg.arg}",
@@ -389,6 +397,39 @@ class ContextAwareVisitor(ast.NodeVisitor):
                 scope=func_scope
             )
             func_scope.symbols[arg.arg] = param_symbol
+        
+        # 仅关键字参数
+        for arg in args.kwonlyargs:
+            param_symbol = Symbol(
+                name=arg.arg,
+                qname=f"{qname}.{arg.arg}",
+                symbol_type='parameter',
+                def_node=arg,
+                scope=func_scope
+            )
+            func_scope.symbols[arg.arg] = param_symbol
+            
+        # *args
+        if args.vararg:
+            param_symbol = Symbol(
+                name=args.vararg.arg,
+                qname=f"{qname}.{args.vararg.arg}",
+                symbol_type='parameter',
+                def_node=args.vararg,
+                scope=func_scope
+            )
+            func_scope.symbols[args.vararg.arg] = param_symbol
+            
+        # **kwargs
+        if args.kwarg:
+            param_symbol = Symbol(
+                name=args.kwarg.arg,
+                qname=f"{qname}.{args.kwarg.arg}",
+                symbol_type='parameter',
+                def_node=args.kwarg,
+                scope=func_scope
+            )
+            func_scope.symbols[args.kwarg.arg] = param_symbol
             
         # 分析函数体
         for stmt in node.body:
@@ -457,6 +498,17 @@ class ContextAwareVisitor(ast.NodeVisitor):
         """处理赋值语句"""
         # 只在模块级收集变量
         if self.current_scope().scope_type != 'module':
+            # 在函数内部也要注册局部变量，以避免错误的依赖分析
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    local_var = Symbol(
+                        name=target.id,
+                        qname=f"{self.get_current_qname()}.{target.id}",
+                        symbol_type='local_var',
+                        def_node=node,
+                        scope=self.current_scope()
+                    )
+                    self.current_scope().symbols[target.id] = local_var
             return
             
         for target in node.targets:
@@ -476,8 +528,18 @@ class ContextAwareVisitor(ast.NodeVisitor):
                 )
                 
                 # 收集赋值表达式的依赖
-                deps = self.collect_dependencies_from_node(node.value)
+                deps = self.analyze_dependencies(node.value)
                 symbol.dependencies.update(deps)
+                
+                # 特殊处理 __all__
+                if target.id == '__all__' and isinstance(node.value, (ast.List, ast.Tuple)):
+                    # 记录原始的导出列表
+                    export_list = []
+                    for elt in node.value.elts:
+                        if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                            export_list.append(elt.value)
+                    # 将导出列表存储在符号的特殊属性中
+                    symbol.export_list = export_list
                 
                 self.current_scope().symbols[target.id] = symbol
                 self.all_symbols[qname] = symbol
@@ -499,75 +561,157 @@ class ContextAwareVisitor(ast.NodeVisitor):
             )
             
             if node.value:
-                deps = self.collect_dependencies_from_node(node.value)
+                deps = self.analyze_dependencies(node.value)
                 symbol.dependencies.update(deps)
                 
             self.current_scope().symbols[node.target.id] = symbol
             self.all_symbols[qname] = symbol
             
-    def collect_dependencies_from_node(self, node: ast.AST) -> Set[Symbol]:
-        """从AST节点收集依赖符号"""
+    def visit_For(self, node: Union[ast.For, ast.AsyncFor]):
+        """处理 for 循环"""
+        # 注册循环变量
+        if isinstance(node.target, ast.Name):
+            loop_var = Symbol(
+                name=node.target.id,
+                qname=f"{self.get_current_qname()}.{node.target.id}",
+                symbol_type='loop_var',
+                def_node=node.target,
+                scope=self.current_scope()
+            )
+            self.current_scope().symbols[node.target.id] = loop_var
+        
+        # 继续访问循环体
+        self.generic_visit(node)
+        
+    def visit_AsyncFor(self, node: ast.AsyncFor):
+        """处理异步 for 循环"""
+        self.visit_For(node)
+        
+    def visit_With(self, node: Union[ast.With, ast.AsyncWith]):
+        """处理 with 语句"""
+        for item in node.items:
+            if item.optional_vars and isinstance(item.optional_vars, ast.Name):
+                with_var = Symbol(
+                    name=item.optional_vars.id,
+                    qname=f"{self.get_current_qname()}.{item.optional_vars.id}",
+                    symbol_type='variable',
+                    def_node=item.optional_vars,
+                    scope=self.current_scope()
+                )
+                self.current_scope().symbols[item.optional_vars.id] = with_var
+        
+        self.generic_visit(node)
+        
+    def visit_AsyncWith(self, node: ast.AsyncWith):
+        """处理异步 with 语句"""
+        self.visit_With(node)
+        
+    def visit_ListComp(self, node: ast.ListComp):
+        """处理列表推导式"""
+        self._visit_comprehension(node)
+        
+    def visit_SetComp(self, node: ast.SetComp):
+        """处理集合推导式"""
+        self._visit_comprehension(node)
+        
+    def visit_DictComp(self, node: ast.DictComp):
+        """处理字典推导式"""
+        self._visit_comprehension(node)
+        
+    def visit_GeneratorExp(self, node: ast.GeneratorExp):
+        """处理生成器表达式"""
+        self._visit_comprehension(node)
+        
+    def _visit_comprehension(self, node):
+        """处理所有推导式的通用逻辑"""
+        # 创建推导式作用域
+        comp_scope = Scope(
+            scope_type='comprehension',
+            node=node,
+            module_path=self.current_module_path
+        )
+        self.push_scope(comp_scope)
+        
+        # 注册推导式中的目标变量
+        for generator in node.generators:
+            if isinstance(generator.target, ast.Name):
+                comp_var = Symbol(
+                    name=generator.target.id,
+                    qname=f"{self.get_current_qname()}.{generator.target.id}",
+                    symbol_type='loop_var',
+                    def_node=generator.target,
+                    scope=comp_scope
+                )
+                comp_scope.symbols[generator.target.id] = comp_var
+        
+        # 访问推导式内容
+        self.generic_visit(node)
+        
+        self.pop_scope()
+        
+    def get_current_qname(self) -> str:
+        """获取当前作用域的限定名"""
+        if self.current_scope().scope_type == 'module':
+            return self.get_module_qname(self.current_module_path)
+        
+        # 查找当前作用域对应的符号
+        for symbol in self.all_symbols.values():
+            if symbol.def_node == self.current_scope().node:
+                return symbol.qname
+                
+        return ""
+    
+    def analyze_dependencies(self, node: ast.AST, parent_scope: Optional[Scope] = None) -> Set[Symbol]:
+        """分析AST节点的依赖，使用作用域栈"""
+        if parent_scope:
+            # 临时推入父作用域以便正确解析名称
+            original_stack_size = len(self.scope_stack)
+            self.push_scope(parent_scope)
+        
         dependencies = set()
         
-        class DependencyCollector(ast.NodeVisitor):
-            def __init__(self, resolver):
-                self.resolver = resolver
+        # 使用一个访问器来正确处理作用域
+        class LocalDependencyAnalyzer(ast.NodeVisitor):
+            def __init__(self, outer):
+                self.outer = outer
                 self.deps = set()
-                self.local_vars = set()  # 局部变量
-                
-            def visit_FunctionDef(self, node):
-                # 不进入嵌套函数
-                pass
-                
-            def visit_AsyncFunctionDef(self, node):
-                # 不进入嵌套异步函数
-                pass
-                
-            def visit_ClassDef(self, node):
-                # 不进入嵌套类
-                pass
                 
             def visit_Name(self, node):
-                if isinstance(node.ctx, ast.Store):
-                    # 局部赋值
-                    self.local_vars.add(node.id)
-                elif isinstance(node.ctx, ast.Load) and node.id not in self.local_vars:
-                    # 引用外部符号
-                    symbol = self.resolver.resolve_name(node.id)
-                    if symbol:
+                if isinstance(node.ctx, ast.Load):
+                    symbol = self.outer.resolve_name(node.id)
+                    if symbol and symbol.symbol_type not in ('parameter', 'loop_var', 'local_var'):
                         self.deps.add(symbol)
                         
             def visit_Attribute(self, node):
                 # 处理属性访问
                 if isinstance(node.value, ast.Name):
-                    symbol = self.resolver.resolve_name(node.value.id)
-                    if symbol:
+                    symbol = self.outer.resolve_name(node.value.id)
+                    if symbol and symbol.symbol_type not in ('parameter', 'loop_var', 'local_var'):
                         self.deps.add(symbol)
                 self.generic_visit(node)
                 
-            def visit_Call(self, node):
-                # 处理函数调用
-                if isinstance(node.func, ast.Name):
-                    symbol = self.resolver.resolve_name(node.func.id)
-                    if symbol:
-                        self.deps.add(symbol)
-                elif isinstance(node.func, ast.Attribute):
-                    self.visit_Attribute(node.func)
-                self.generic_visit(node)
+            def visit_FunctionDef(self, node):
+                # 不进入嵌套函数定义
+                pass
                 
-            def visit_Global(self, node):
-                # global声明的变量不是局部变量
-                for name in node.names:
-                    self.local_vars.discard(name)
-                    
-            def visit_Nonlocal(self, node):
-                # nonlocal声明的变量不是局部变量
-                for name in node.names:
-                    self.local_vars.discard(name)
-                    
-        collector = DependencyCollector(self)
-        collector.visit(node)
-        return collector.deps
+            def visit_AsyncFunctionDef(self, node):
+                # 不进入嵌套异步函数定义
+                pass
+                
+            def visit_ClassDef(self, node):
+                # 不进入嵌套类定义
+                pass
+                
+        analyzer = LocalDependencyAnalyzer(self)
+        analyzer.visit(node)
+        dependencies = analyzer.deps
+                        
+        if parent_scope:
+            # 恢复原始作用域栈
+            while len(self.scope_stack) > original_stack_size:
+                self.pop_scope()
+                
+        return dependencies
         
     def collect_function_dependencies(self, node: Union[ast.FunctionDef, ast.AsyncFunctionDef]) -> Set[Symbol]:
         """收集函数的所有依赖"""
@@ -575,7 +719,7 @@ class ContextAwareVisitor(ast.NodeVisitor):
         
         # 收集函数体的依赖
         for stmt in node.body:
-            deps = self.collect_dependencies_from_node(stmt)
+            deps = self.analyze_dependencies(stmt)
             dependencies.update(deps)
             
         return dependencies
@@ -639,7 +783,7 @@ class AdvancedCodeMerger:
                 main_code.append(node)
                 
                 # 收集主代码中引用的符号
-                deps = self.visitor.collect_dependencies_from_node(node)
+                deps = self.visitor.analyze_dependencies(node)
                 initial_symbols.update(deps)
                         
         return initial_symbols, main_code
@@ -754,7 +898,7 @@ class AdvancedCodeMerger:
         self.generate_name_mappings(output_symbols)
         
         # 6. 生成代码
-        transformer = AdvancedNodeTransformer(self.name_mappings, self.visitor)
+        transformer = AdvancedNodeTransformer(self.name_mappings, self.visitor, self.visitor.all_symbols)
         
         result_lines = []
         
@@ -816,10 +960,12 @@ class AdvancedCodeMerger:
 class AdvancedNodeTransformer(ast.NodeTransformer):
     """高级代码转换器"""
     
-    def __init__(self, name_mappings: Dict[str, str], visitor: ContextAwareVisitor):
-        self.name_mappings = name_mappings
+    def __init__(self, name_mappings: Dict[str, str], visitor: ContextAwareVisitor, 
+                 all_symbols: Dict[str, Symbol]):
+        self.name_mappings = name_mappings  # qname -> new_name
         self.visitor = visitor
-        self.current_scope_mappings: Dict[str, str] = {}
+        self.all_symbols = all_symbols
+        self.current_scope_stack = []  # 当前的作用域栈
         
     def transform_symbol(self, symbol: Symbol) -> ast.AST:
         """转换符号定义"""
@@ -837,8 +983,8 @@ class AdvancedNodeTransformer(ast.NodeTransformer):
         if isinstance(node, ast.Name):
             return None
             
-        # 设置当前作用域映射
-        self.current_scope_mappings = self.build_scope_mappings(symbol)
+        # 设置当前作用域栈
+        self.current_scope_stack = [symbol.scope]
         
         # 转换节点
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -846,39 +992,76 @@ class AdvancedNodeTransformer(ast.NodeTransformer):
         elif isinstance(node, ast.ClassDef):
             return self.transform_class(node, symbol)
         elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            # 特殊处理 __all__
+            if isinstance(node, ast.Assign) and symbol.export_list:
+                return self.transform_all_assignment(node, symbol)
             return self.visit(node)
         else:
             # 其他类型的符号，跳过
             return None
             
-    def build_scope_mappings(self, symbol: Symbol) -> Dict[str, str]:
-        """构建作用域内的名称映射"""
-        mappings = {}
+    def get_current_module_path(self) -> Optional[Path]:
+        """获取当前模块路径"""
+        if self.current_scope_stack:
+            return self.current_scope_stack[0].module_path
+        return None
         
-        # 收集当前符号所在模块的所有导入别名
-        module_path = symbol.scope.module_path
-        if module_path and module_path in self.visitor.module_symbols:
-            module_syms = self.visitor.module_symbols[module_path]
-            for sym_name, sym in module_syms.items():
-                if sym_name == '__scope__':
-                    continue
-                if isinstance(sym, Symbol) and sym.symbol_type == 'import_alias':
-                    # 这是一个导入别名
-                    if sym.dependencies:
-                        # 找到它指向的真实符号
-                        for target_sym in sym.dependencies:
-                            if target_sym.qname in self.name_mappings:
-                                mappings[sym.name] = self.name_mappings[target_sym.qname]
-                                break
+    def find_symbol_qname(self, name: str) -> Optional[str]:
+        """查找符号的限定名"""
+        current_module = self.get_current_module_path()
         
-        # 收集所有可能被引用的符号
-        for dep in symbol.dependencies:
-            if dep.qname in self.name_mappings:
-                # 直接依赖的映射
-                if dep.symbol_type != 'import_alias':
-                    mappings[dep.name] = self.name_mappings[dep.qname]
+        # 首先查找当前模块中的符号
+        if current_module:
+            # 查找模块级符号
+            module_qname = self.visitor.get_module_qname(current_module)
+            
+            # 1. 检查是否是模块内定义的符号
+            test_qname = f"{module_qname}.{name}"
+            if test_qname in self.all_symbols:
+                return test_qname
+                
+            # 2. 检查是否是导入的别名
+            if current_module in self.visitor.module_symbols:
+                module_syms = self.visitor.module_symbols[current_module]
+                if name in module_syms and isinstance(module_syms[name], Symbol):
+                    sym = module_syms[name]
+                    if sym.symbol_type == 'import_alias':
+                        if sym.dependencies:
+                            # 返回导入指向的真实符号的qname
+                            for dep in sym.dependencies:
+                                return dep.qname
+                        # 如果没有依赖，返回自己的qname
+                        return sym.qname
                     
-        return mappings
+        return None
+        
+    def transform_all_assignment(self, node: ast.Assign, symbol: Symbol) -> ast.AST:
+        """转换 __all__ 赋值，更新导出列表中的名称"""
+        # 深拷贝节点
+        new_node = copy.deepcopy(node)
+        
+        # 如果值是列表或元组，更新其中的字符串
+        if isinstance(new_node.value, (ast.List, ast.Tuple)):
+            new_elts = []
+            for elt in new_node.value.elts:
+                if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                    old_name = elt.value
+                    # 查找这个名称对应的符号
+                    for sym in self.all_symbols.values():
+                        if sym.name == old_name and sym.scope.module_path == self.current_module_path:
+                            if sym.qname in self.name_mappings:
+                                # 使用新名称
+                                new_elt = ast.Constant(value=self.name_mappings[sym.qname])
+                                new_elts.append(new_elt)
+                                break
+                    else:
+                        # 保持原名称
+                        new_elts.append(elt)
+                else:
+                    new_elts.append(elt)
+            new_node.value.elts = new_elts
+            
+        return new_node
         
     def transform_function(self, node: Union[ast.FunctionDef, ast.AsyncFunctionDef], 
                          symbol: Symbol) -> ast.AST:
@@ -893,8 +1076,34 @@ class AdvancedNodeTransformer(ast.NodeTransformer):
             new_decorators.append(self.visit(decorator))
         node.decorator_list = new_decorators
         
+        # 为函数体创建新的作用域
+        # 查找函数对应的作用域
+        func_scope = None
+        for sym_qname, sym in self.all_symbols.items():
+            if sym.def_node == symbol.def_node and sym.symbol_type == 'function':
+                # 找到函数符号后，查找其对应的作用域
+                for scope_sym in self.all_symbols.values():
+                    if scope_sym.scope.node == node:
+                        func_scope = scope_sym.scope
+                        break
+                break
+                
+        if not func_scope:
+            # 创建临时作用域
+            func_scope = Scope(
+                scope_type='function',
+                node=node,
+                module_path=self.current_scope_stack[0].module_path if self.current_scope_stack else None
+            )
+            
+        # 推入函数作用域
+        self.current_scope_stack.append(func_scope)
+        
         # 转换函数体
         node.body = [self.visit(stmt) for stmt in node.body]
+        
+        # 弹出函数作用域
+        self.current_scope_stack.pop()
         
         return node
         
@@ -920,33 +1129,29 @@ class AdvancedNodeTransformer(ast.NodeTransformer):
         
     def visit_Name(self, node: ast.Name):
         """转换名称引用"""
-        if node.id in self.current_scope_mappings:
-            node.id = self.current_scope_mappings[node.id]
+        if isinstance(node.ctx, ast.Load):
+            # 查找符号的限定名
+            qname = self.find_symbol_qname(node.id)
+            if qname and qname in self.name_mappings:
+                node.id = self.name_mappings[qname]
         return node
         
     def visit_Attribute(self, node: ast.Attribute):
         """转换属性访问"""
-        # 处理模块别名的属性访问
-        if isinstance(node.value, ast.Name):
-            if node.value.id in self.current_scope_mappings:
-                # 这是一个模块别名
-                # 需要检查是否应该直接替换为函数名
-                full_name = f"{node.value.id}.{node.attr}"
-                if full_name in self.current_scope_mappings:
-                    # 直接替换为映射后的名称
-                    return ast.Name(
-                        id=self.current_scope_mappings[full_name],
-                        ctx=node.ctx
-                    )
-                    
+        # 暂时只处理简单的属性访问
         return self.generic_visit(node)
         
     def visit_Global(self, node: ast.Global):
         """转换global声明"""
+        # Global声明的名称通常不需要转换，因为它们引用的是模块级名称
+        # 但我们仍然需要检查是否有映射
         new_names = []
         for name in node.names:
-            if name in self.current_scope_mappings:
-                new_names.append(self.current_scope_mappings[name])
+            # 查找模块级符号
+            module_qname = self.visitor.get_module_qname(self.current_module_path)
+            symbol_qname = f"{module_qname}.{name}"
+            if symbol_qname in self.name_mappings:
+                new_names.append(self.name_mappings[symbol_qname])
             else:
                 new_names.append(name)
         node.names = new_names
@@ -954,21 +1159,12 @@ class AdvancedNodeTransformer(ast.NodeTransformer):
         
     def visit_Nonlocal(self, node: ast.Nonlocal):
         """转换nonlocal声明"""
-        new_names = []
-        for name in node.names:
-            if name in self.current_scope_mappings:
-                new_names.append(self.current_scope_mappings[name])
-            else:
-                new_names.append(name)
-        node.names = new_names
+        # Nonlocal声明需要特殊处理
         return node
         
     def visit_Constant(self, node: ast.Constant):
         """处理字符串常量中的类型注解"""
-        if isinstance(node.value, str):
-            # 简单处理：如果字符串恰好是一个需要重命名的符号名
-            if node.value in self.current_scope_mappings:
-                node.value = self.current_scope_mappings[node.value]
+        # 暂时不处理字符串类型注解
         return node
 
 
