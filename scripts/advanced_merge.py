@@ -901,13 +901,25 @@ class AdvancedCodeMerger:
         except SyntaxError as e:
             return {'syntax_error': [str(e)], 'undefined_names': [], 'duplicate_imports': []}
 
+        # 辅助函数：递归提取赋值目标中的所有名称
+        def _extract_defined_names(target_node):
+            names = set()
+            if isinstance(target_node, ast.Name):
+                names.add(target_node.id)
+            elif isinstance(target_node, (ast.Tuple, ast.List)):
+                for element in target_node.elts:
+                    names.update(_extract_defined_names(element))
+            return names
+
         defined = set()
         # 收集所有定义
         for n in ast.walk(tree):
             if isinstance(n, (ast.FunctionDef, ast.ClassDef, ast.AsyncFunctionDef)):
                 defined.add(n.name)
-            elif isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name):
-                defined.add(n.targets[0].id)
+            elif isinstance(n, ast.Assign):
+                # 处理所有赋值目标，包括链式赋值和元组解包
+                for target in n.targets:
+                    defined.update(_extract_defined_names(target))
             elif isinstance(n, ast.Import):
                 for alias in n.names:
                     defined.add(alias.asname or alias.name.split('.')[-1])
@@ -1373,6 +1385,9 @@ def main():
             
         print(f"Merged code written to: {output_path}")
         
+    except KeyboardInterrupt:
+        print("\n操作已被用户中断 (Ctrl+C)。")
+        sys.exit(130)
     except Exception as e:
         print(f"Error: {e}")
         import traceback
