@@ -10,69 +10,87 @@ This is a Python code merging tool project that implements utilities for flatten
 
 ```
 /Demo/
-├── a_pkg/                    # Demo package A
-│   ├── __init__.py          # (empty)
-│   └── a.py                 # Contains global_same(), hello(), hello2() functions
-├── b_pkg/                   # Demo package B  
-│   ├── __init__.py          # (empty)
-│   └── b.py                 # Contains global_same(), b_hello() functions, imports from a_pkg
-├── test_pkg/                # Test packages for advanced features
-│   ├── __init__.py          # (empty)
-│   ├── unique_func.py       # Test cases for smart renaming
-│   ├── order_test.py        # Test cases for dependency ordering
-│   └── complex_deps.py      # Complex multi-layer dependency tests
-└── scripts/                 # Main scripts directory
-    ├── __init__.py          # Package marker (empty)
-    ├── my_scripts.py        # Main demo script that imports from both packages
-    ├── test_issues.py       # Test script for smart renaming and ordering
-    ├── test_complex.py      # Test script for complex dependencies
-    ├── ultimate_merge.py    # ✅ WORKING code merger with smart features
-    └── advanced_merge.py    # 🆕 Enhanced merger with AST-based analysis
+├── scripts/                 # Main scripts directory
+│   ├── __init__.py          # Package marker (empty)
+│   └── advanced_merge.py    # 🚀 The code merger with comprehensive AST analysis
+├── examples/                # Example scripts and demo packages
+│   ├── __init__.py          # Package marker (empty)
+│   ├── demo_packages/       # Demo packages for examples
+│   │   ├── __init__.py      # Package marker (empty)
+│   │   ├── a_pkg/           # Demo package A
+│   │   │   ├── __init__.py  # (empty)
+│   │   │   └── a.py         # Contains global_same(), hello(), hello2() functions
+│   │   └── b_pkg/           # Demo package B
+│   │       ├── __init__.py  # (empty)
+│   │       └── b.py         # Contains global_same(), b_hello() functions, imports from a_pkg
+│   ├── my_scripts.py        # Main demo script that imports from demo_packages
+│   ├── example_complex_deps.py  # Example showing complex dependency handling
+│   └── example_smart_rename.py  # Example showing smart renaming and ordering
+├── tests/                   # Test files (actual pytest tests)
+│   ├── __init__.py          # Package marker (empty)
+│   ├── fixtures/            # Test fixtures
+│   │   ├── __init__.py      # Package marker (empty)
+│   │   └── test_pkg/        # Test packages for advanced features
+│   │       ├── __init__.py  # (empty)
+│   │       ├── unique_func.py    # Test cases for smart renaming
+│   │       ├── order_test.py     # Test cases for dependency ordering
+│   │       └── complex_deps.py   # Complex multi-layer dependency tests
+│   ├── test_regression.py   # Regression tests
+│   └── test_advanced_merger_fixes.py  # Tests for advanced merger fixes
+├── conftest.py              # Pytest configuration
+└── pytest.ini               # Pytest settings
 ```
 
 ## Key Components
 
-### ✅ Code Merger Tools
-- **`scripts/ultimate_merge.py`**: The first enhanced implementation with intelligent features:
-  - **Smart renaming**: Only renames functions when there are actual conflicts
-  - **Dependency ordering**: Uses topological sort to ensure correct function definition order
-  - **Complete dependency resolution**: Recursively finds all required functions
-  - **Import alias handling**: Correctly processes all import variations
-
-- **`scripts/advanced_merge.py`**: The latest implementation with comprehensive AST analysis:
+### 🚀 Code Merger Tool
+- **`scripts/advanced_merge.py`**: The comprehensive implementation with advanced AST analysis:
   - **Advanced scope analysis**: Full LEGB (Local, Enclosing, Global, Built-in) scope resolution
   - **Symbol tracking**: Comprehensive tracking of all Python symbols (functions, classes, variables)
   - **Enhanced attribute resolution**: Supports nested attribute chains (e.g., `a.b.c.d`)
   - **Correct nonlocal/global handling**: Properly tracks and preserves scope declarations
   - **Import alias mapping**: Complete support for all import patterns and aliases
 
-### Demo Code
-- **`a_pkg/a.py`**: Contains `global_same()`, `hello()`, `hello2()` - demonstrates internal dependencies
-- **`b_pkg/b.py`**: Contains `global_same()`, `b_hello()` - demonstrates cross-module imports with aliases
-- **`scripts/my_scripts.py`**: Main demo script importing from both packages
+### Example Code
+- **`examples/demo_packages/a_pkg/a.py`**: Contains `global_same()`, `hello()`, `hello2()` - demonstrates internal dependencies
+- **`examples/demo_packages/b_pkg/b.py`**: Contains `global_same()`, `b_hello()` - demonstrates cross-module imports with aliases
+- **`examples/my_scripts.py`**: Main demo script importing from both demo packages
+- **`examples/example_complex_deps.py`**: Example showing how the merger handles complex dependencies
+- **`examples/example_smart_rename.py`**: Example demonstrating smart renaming and ordering features
 
 ### Test Code
-- **`test_pkg/unique_func.py`**: Functions with unique names that shouldn't be renamed
-- **`test_pkg/order_test.py`**: Multi-level dependencies to test correct ordering
-- **`test_pkg/complex_deps.py`**: Complex dependency chains for advanced testing
-- **`test_issue3_fixes.py`**: Comprehensive tests for issue #3 fixes in advanced_merge.py
+- **`tests/fixtures/test_pkg/`**: Test fixtures used by actual pytest tests
+  - `unique_func.py`: Functions with unique names that shouldn't be renamed
+  - `order_test.py`: Multi-level dependencies to test correct ordering
+  - `complex_deps.py`: Complex dependency chains for advanced testing
+- **`tests/test_advanced_merger_fixes.py`**: Comprehensive tests for advanced merger fixes
+- **`tests/test_regression.py`**: Regression tests to ensure stability
 
 ## Development Commands
 
 This project lacks standard Python configuration files (no requirements.txt, setup.py, pyproject.toml). To work with the code:
 
 ```bash
-# Run the main demo script (requires PYTHONPATH)
-PYTHONPATH=. python scripts/my_scripts.py
+# Run example scripts (requires PYTHONPATH)
+PYTHONPATH=examples python examples/my_scripts.py
+PYTHONPATH=. python examples/example_complex_deps.py
+PYTHONPATH=. python examples/example_smart_rename.py
 
-# Run the code merger tools
-python scripts/ultimate_merge.py scripts/my_scripts.py .
-python scripts/advanced_merge.py scripts/my_scripts.py .
+# Run the code merger tool on examples
+python scripts/advanced_merge.py examples/my_scripts.py examples
+python scripts/advanced_merge.py examples/example_complex_deps.py .
+
+# Run pytest (only runs actual tests, not examples)
+pytest
 ```
 
-## ✅ Ultimate Merge Tool
+### Import Structure
+- Example scripts use absolute imports appropriate to their location
+- Demo packages use relative imports within the package structure
+- Test files are properly isolated in the `tests/` directory
+- The `conftest.py` automatically sets up PYTHONPATH for pytest
 
-**`scripts/ultimate_merge.py`** is the first enhanced implementation with intelligent features:
+## 🚀 Advanced Merge Tool Features
 
 ### Core Features
 - **✅ Complete dependency resolution**: Recursively finds all required functions across modules
@@ -82,7 +100,7 @@ python scripts/advanced_merge.py scripts/my_scripts.py .
 - **✅ Cross-module dependency tracking**: Handles complex dependency chains between modules
 - **✅ Correct output**: Merged script produces identical output to original
 
-### Advanced Features (FULLY IMPLEMENTED)
+### Advanced Features
 - **✅ Smart renaming**: Only renames functions when there are actual naming conflicts
   - Functions with unique names keep their original names
   - Only conflicting functions get module prefixes (`a_pkg_a_global_same` vs `b_pkg_b_global_same`)
@@ -93,28 +111,31 @@ python scripts/advanced_merge.py scripts/my_scripts.py .
 - **✅ Source tracking**: Each function includes a comment showing its source file
   - Example: `# From a_pkg/a.py`
   - Helps trace code origin in merged files
+- **✅ Advanced scope analysis**: Full LEGB (Local, Enclosing, Global, Built-in) scope resolution
+- **✅ Comprehensive symbol tracking**: Tracks all Python symbols (functions, classes, variables)
+- **✅ Enhanced attribute resolution**: Supports nested attribute chains (e.g., `a.b.c.d`)
+- **✅ Proper scope declarations**: Correctly tracks and preserves nonlocal/global declarations
 
 ### Usage
 ```bash
-python scripts/ultimate_merge.py <script_path> <project_root>
+python scripts/advanced_merge.py <script_path> <project_root>
+# Output: The merged file will be created in the same directory as the source script,
+# with '_advanced_merged.py' appended to the filename.
 ```
 
 ### Examples
 ```bash
-# Merge the demo script (basic functionality)
-python scripts/ultimate_merge.py scripts/my_scripts.py .
-# Output: scripts/my_scripts_ultimate_merged.py
+# Merge the demo script
+python scripts/advanced_merge.py examples/my_scripts.py examples
+# Output: examples/my_scripts_advanced_merged.py
 
-# Test smart renaming and dependency ordering
-python scripts/ultimate_merge.py scripts/test_issues.py .
-# Output: scripts/test_issues_ultimate_merged.py
+# Merge example showing smart renaming
+python scripts/advanced_merge.py examples/example_smart_rename.py .
+# Output: examples/example_smart_rename_advanced_merged.py
 
-# Test complex dependency chains
-python scripts/ultimate_merge.py scripts/test_complex.py .
-# Output: scripts/test_complex_ultimate_merged.py
-
-# Merge any Python script in your project
-python scripts/ultimate_merge.py your_script.py /path/to/project/root
+# Merge example with complex dependencies
+python scripts/advanced_merge.py examples/example_complex_deps.py .
+# Output: examples/example_complex_deps_advanced_merged.py
 ```
 
 ### Technical Implementation
@@ -136,45 +157,45 @@ The demo packages showcase complex dependency scenarios that the merger tool han
 
 ### Cross-package Dependencies
 ```python
-# a_pkg/a.py
+# examples/demo_packages/a_pkg/a.py
 def global_same():     # Function with same name as in b_pkg
 def hello():           # Calls global_same() internally  
 def hello2():          # Also calls global_same() internally
 
-# b_pkg/b.py  
-from a_pkg.a import hello2                    # Direct import
-from a_pkg.a import global_same as global_same_a  # Import with alias
+# examples/demo_packages/b_pkg/b.py  
+from ..a_pkg.a import hello2                    # Relative import
+from ..a_pkg.a import global_same as global_same_a  # Relative import with alias
 def global_same():     # Same name as in a_pkg (conflict!)
 def b_hello():         # Calls hello2(), global_same(), global_same_a()
 
-# scripts/my_scripts.py
-from a_pkg.a import hello     # Import from first package
-from b_pkg.b import b_hello   # Import from second package
+# examples/my_scripts.py
+from demo_packages.a_pkg.a import hello     # Import from first package
+from demo_packages.b_pkg.b import b_hello   # Import from second package
 ```
 
 ### How Advanced Merger Resolves This
 ```python
-# Output: scripts/my_scripts_ultimate_merged.py
-# From a_pkg/a.py
+# Output: examples/my_scripts_advanced_merged.py
+# From examples/demo_packages/a_pkg/a.py
 def a_pkg_a_global_same():    # Only renamed due to conflict with b_pkg version
     print('Global same in a')
 
-# From a_pkg/a.py
+# From examples/demo_packages/a_pkg/a.py
 def hello2():
     print('Hello World2')
     a_pkg_a_global_same()
 
-# From b_pkg/b.py
+# From examples/demo_packages/b_pkg/b.py
 def b_pkg_b_global_same():    # Only renamed due to conflict with a_pkg version
     print('Global same in b')
 
-# From b_pkg/b.py
+# From examples/demo_packages/b_pkg/b.py
 def b_hello():
     hello2()
     b_pkg_b_global_same()     # Calls its own global_same
     a_pkg_a_global_same()     # Calls aliased function correctly
 
-# From a_pkg/a.py
+# From examples/demo_packages/a_pkg/a.py
 def hello():
     print('Hello World')
     a_pkg_a_global_same()
@@ -186,21 +207,21 @@ if __name__ == '__main__':
 
 ### Smart Renaming Examples
 ```python
-# Output: scripts/test_issues_ultimate_merged.py
-# From test_pkg/order_test.py
+# Output: examples/example_smart_rename_advanced_merged.py
+# From tests/fixtures/test_pkg/order_test.py
 def level_3_func():                         # Keeps original name (no conflict)
     """第三层函数，不依赖其他函数"""
     print('Level 3 function')
     return 'level3'
 
-# From test_pkg/order_test.py
+# From tests/fixtures/test_pkg/order_test.py
 def level_2_func():                         # Keeps original name (no conflict)
     """第二层函数，依赖level_3_func"""
     print('Level 2 function')
     result = level_3_func()
     return f'level2_{result}'
 
-# From test_pkg/unique_func.py
+# From tests/fixtures/test_pkg/unique_func.py
 def unique_function():                      # Keeps original name (no conflict)
     """这个函数名在整个项目中是独特的，不应该被重命名"""
     print('I am unique function')
@@ -209,65 +230,34 @@ def unique_function():                      # Keeps original name (no conflict)
 
 ### Dependency Ordering Examples
 ```python
-# Output: scripts/test_complex_ultimate_merged.py (correct order)
-# From test_pkg/complex_deps.py
+# Output: examples/example_complex_deps_advanced_merged.py (correct order)
+# From tests/fixtures/test_pkg/complex_deps.py
 def base_util():              # Level 0: No dependencies
     return 'base'
 
-# From test_pkg/complex_deps.py
+# From tests/fixtures/test_pkg/complex_deps.py
 def formatter(value):         # Level 1: Depends on base_util
     base = base_util()
     return f'{base}:{value}'
 
-# From test_pkg/complex_deps.py
+# From tests/fixtures/test_pkg/complex_deps.py
 def validator(data):          # Level 2: Depends on formatter
     formatted = formatter(data)
     return f'valid[{formatted}]'
 
-# From test_pkg/complex_deps.py
+# From tests/fixtures/test_pkg/complex_deps.py
 def processor(input_data):    # Level 3: Depends on validator & base_util
     validated = validator(input_data)
     base = base_util()
     return f'process({validated}, {base})'
 
-# From test_pkg/complex_deps.py
+# From tests/fixtures/test_pkg/complex_deps.py
 def main_handler(data):       # Level 4: Depends on processor & formatter
     processed = processor(data)
     formatted = formatter('final')
     return f'main[{processed}, {formatted}]'
 ```
 
-## 🆕 Advanced Merge Tool
-
-**`scripts/advanced_merge.py`** is the latest implementation with comprehensive AST-based analysis:
-
-### Enhanced Features
-- **Advanced Scope Analysis**: Full LEGB (Local, Enclosing, Global, Built-in) scope resolution
-- **Comprehensive Symbol Tracking**: Tracks all Python symbols including:
-  - Functions (regular and async)
-  - Classes
-  - Variables (module-level, local, parameters)
-  - Import aliases
-  - Loop variables and comprehension scopes
-- **Enhanced Attribute Resolution**: 
-  - Supports nested attribute chains (e.g., `a.b.c.d`)
-  - Correctly handles import aliases in attribute access
-- **Proper Scope Declarations**:
-  - Correctly tracks and preserves `nonlocal` and `global` declarations
-  - Avoids overwriting declared nonlocal/global variables
-- **Import Alias Mapping**: Complete support for all import patterns
-
-### Recent Fixes (Issue #3)
-1. **TypeError Fix**: Corrected `current_module_path` method call
-2. **Nested Attribute Access**: Full support for deep attribute chains
-3. **Scope Preservation**: Proper handling of nonlocal/global variables
-4. **Import Mapping**: Enhanced resolution of imported symbols
-
-### Usage
-```bash
-python scripts/advanced_merge.py <script_path> <project_root>
-# Output: <script_name>_advanced_merged.py
-```
 
 ## Development Environment
 
@@ -276,23 +266,11 @@ python scripts/advanced_merge.py <script_path> <project_root>
 - **Git**: Git repository with GitHub integration
 - **Dependencies**: Uses only Python standard library (`ast`, `pathlib`, `typing`)
 
-## Key Features Summary
-
-### Ultimate Merge (`ultimate_merge.py`)
-✅ **Smart Renaming**: Only renames conflicting functions, preserving unique names
-✅ **Dependency Ordering**: Uses topological sort for correct function definition order  
-✅ **Source Tracking**: Comments show original file location for each function
-✅ **Import Alias Handling**: Correctly processes `import X as Y` patterns
-✅ **Minimal Code**: Only includes actually used functions
-✅ **Perfect Output**: Merged scripts produce identical output to originals
-
-### Advanced Merge (`advanced_merge.py`)
-✅ **All features from Ultimate Merge** plus:
-✅ **Full Scope Analysis**: Complete LEGB scope resolution
-✅ **Variable Tracking**: Tracks all variable types and scopes
-✅ **Deep Attribute Resolution**: Handles complex nested attributes
-✅ **Scope Declaration Preservation**: Maintains nonlocal/global semantics
-✅ **Enhanced Symbol Resolution**: More robust handling of complex imports
+## Recent Fixes (Issue #3)
+1. **TypeError Fix**: Corrected `current_module_path` method call
+2. **Nested Attribute Access**: Full support for deep attribute chains
+3. **Scope Preservation**: Proper handling of nonlocal/global variables
+4. **Import Mapping**: Enhanced resolution of imported symbols
 
 ## Project Purpose
 
