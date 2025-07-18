@@ -56,3 +56,8 @@ logs/
 *.tmp
 *.temp
 .cache/
+
+# Generated merged files
+*_merged.py
+*_advanced_merged.py
+*_ultimate_merged.py
