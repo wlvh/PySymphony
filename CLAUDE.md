@@ -15,7 +15,9 @@ This is a Python code merging tool project that implements utilities for flatten
 │   ├── my_scripts.py        # Main demo script that imports from test fixtures
 │   └── advanced_merge.py    # 🚀 The code merger with comprehensive AST analysis
 ├── tests/                   # All test files
+│   ├── __init__.py          # Package marker (empty)
 │   ├── fixtures/            # Test fixtures (demo packages)
+│   │   ├── __init__.py      # Package marker (empty)
 │   │   ├── a_pkg/           # Demo package A
 │   │   │   ├── __init__.py  # (empty)
 │   │   │   └── a.py         # Contains global_same(), hello(), hello2() functions
@@ -69,7 +71,17 @@ PYTHONPATH=. python scripts/my_scripts.py
 
 # Run the code merger tool
 python scripts/advanced_merge.py scripts/my_scripts.py .
+
+# Run test scripts as modules (for relative imports)
+PYTHONPATH=. python -m tests.test_complex
+PYTHONPATH=. python -m tests.test_issues
 ```
+
+### Import Structure
+- Scripts in `scripts/` use absolute imports: `from tests.fixtures.a_pkg.a import hello`
+- Test fixtures use relative imports: `from ..a_pkg.a import hello2`
+- Test files use relative imports: `from .fixtures.test_pkg.complex_deps import main_handler`
+- The `conftest.py` automatically sets up PYTHONPATH for pytest
 
 ## 🚀 Advanced Merge Tool Features
 
@@ -142,8 +154,8 @@ def hello():           # Calls global_same() internally
 def hello2():          # Also calls global_same() internally
 
 # tests/fixtures/b_pkg/b.py  
-from tests.fixtures.a_pkg.a import hello2                    # Direct import
-from tests.fixtures.a_pkg.a import global_same as global_same_a  # Import with alias
+from ..a_pkg.a import hello2                    # Relative import
+from ..a_pkg.a import global_same as global_same_a  # Relative import with alias
 def global_same():     # Same name as in a_pkg (conflict!)
 def b_hello():         # Calls hello2(), global_same(), global_same_a()
 
