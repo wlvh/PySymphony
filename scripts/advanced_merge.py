@@ -194,7 +194,11 @@ class ContextAwareVisitor(ast.NodeVisitor):
         """分析单个模块"""
         if module_path in self.analyzed_modules:
             return
-            
+        
+        # --- 保存现场（新增） ---
+        _prev_module_path = getattr(self, "current_module_path", None)
+        # -----------------------
+        
         self.analyzed_modules.add(module_path)
         self.current_module_path = module_path
         
@@ -216,6 +220,10 @@ class ContextAwareVisitor(ast.NodeVisitor):
         self.push_scope(module_scope)
         self.visit(tree)
         self.pop_scope()
+        
+        # --- 恢复现场（新增） ---
+        self.current_module_path = _prev_module_path
+        # -----------------------
         
     def visit_Module(self, node: ast.Module):
         """访问模块节点"""
