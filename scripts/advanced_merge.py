@@ -514,6 +514,12 @@ class ContextAwareVisitor(ast.NodeVisitor):
             # 在函数内部也要注册局部变量，以避免错误的依赖分析
             for target in node.targets:
                 if isinstance(target, ast.Name):
+                    # 检查是否是 nonlocal 或 global 变量
+                    current = self.current_scope()
+                    if target.id in current.nonlocal_vars or target.id in current.global_vars:
+                        # 不要覆盖 nonlocal/global 变量
+                        continue
+                        
                     local_var = Symbol(
                         name=target.id,
                         qname=f"{self.get_current_qname()}.{target.id}",
@@ -1068,6 +1074,9 @@ class AdvancedNodeTransformer(ast.NodeTransformer):
             if symbol.symbol_type == 'import_alias' and symbol.dependencies:
                 # 返回导入指向的真实符号的qname
                 for dep in symbol.dependencies:
+                    # 检查依赖的符号是否有映射的新名称
+                    if dep.qname in self.name_mappings:
+                        return dep.qname  # 返回原始 qname，让调用者处理映射
                     return dep.qname
             return symbol.qname
         return None
@@ -1085,7 +1094,7 @@ class AdvancedNodeTransformer(ast.NodeTransformer):
                     old_name = elt.value
                     # 查找这个名称对应的符号
                     for sym in self.all_symbols.values():
-                        if sym.name == old_name and sym.scope.module_path == self.current_module_path:
+                        if sym.name == old_name and sym.scope.module_path == self.current_module_path():
                             if sym.qname in self.name_mappings:
                                 # 使用新名称
                                 new_elt = ast.Constant(value=self.name_mappings[sym.qname])
@@ -1174,51 +1183,67 @@ class AdvancedNodeTransformer(ast.NodeTransformer):
         return node
         
     def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
-        """转换属性访问"""
-        # 递归解析属性链，直到找到最左侧的根符号
-        # 例如，对于 a.b.c，我们先解析 a
-        # 这是一个简化的实现，只处理单层 a.b
+        """转换属性访问，支持嵌套属性链"""
+        # 递归解析属性链，例如 a.b.c.d
+        # 首先收集整个属性链
+        attrs = []
+        current = node
         
-        # 1. 解析 node.value (例如 global_same_a)
-        if not isinstance(node.value, ast.Name):
-            # 无法处理更复杂的情况，如 (get_obj()).attr，先保持原样
+        # 从右到左收集属性名
+        while isinstance(current, ast.Attribute):
+            attrs.append(current.attr)
+            current = current.value
+            
+        # 如果最左侧不是简单的名称，则保持原样
+        if not isinstance(current, ast.Name):
             return self.generic_visit(node)
+            
+        # attrs 现在是反序的，例如 ['d', 'c', 'b']，需要反转
+        attrs.reverse()
         
-        base_name = node.value.id
-        # 2. 找到基名对应的符号 (global_same_a -> import_alias 符号)
+        # 获取根名称
+        base_name = current.id
         base_symbol = self.resolve_name_to_symbol(base_name)
         
         if not base_symbol:
             # 基名无法解析，保持原样
             return self.generic_visit(node)
             
-        # 3. 找到别名指向的真实符号 (import_alias -> module 符号)
-        # 这需要确保在分析阶段，import_alias 的依赖被正确设置
-        target_symbol = None
+        # 处理别名 - 检查别名本身是否有映射
         if base_symbol.symbol_type == 'import_alias':
-            # 假设别名只有一个依赖，即其指向的模块或符号
+            # 如果导入别名本身在映射中（例如模块别名），使用映射后的名称
+            if base_symbol.qname in self.name_mappings:
+                current.id = self.name_mappings[base_symbol.qname]
+                
+            # 继续处理依赖
             if base_symbol.dependencies:
                 target_symbol = next(iter(base_symbol.dependencies))
+            else:
+                return self.generic_visit(node)
         else:
-            # 如果基名不是别名，而是普通变量，它可能是一个对象实例
-            # 暂时不处理这种情况，但这是未来扩展的方向
             target_symbol = base_symbol
             
         if not target_symbol:
             return self.generic_visit(node)
             
-        # 4. 在真实符号的作用域中查找属性 (在 module 'a_pkg.a' 中查找 'hello2')
-        # 这要求 target_symbol 必须有一个指向其作用域的链接
-        if target_symbol.scope and node.attr in target_symbol.scope.symbols:
-            final_symbol = target_symbol.scope.symbols[node.attr]
-            
-            # 5. 获取最终符号的重命名
-            if final_symbol.qname in self.name_mappings:
-                new_name = self.name_mappings[final_symbol.qname]
-                # 6. 将整个 ast.Attribute 节点替换为ast.Name节点
-                return ast.Name(id=new_name, ctx=node.ctx)
+        # 尝试解析完整的属性链
+        # 对于 a.b.c，我们需要先解析 a.b，再解析 (a.b).c
+        current_symbol = target_symbol
+        
+        for i, attr in enumerate(attrs):
+            if current_symbol.scope and attr in current_symbol.scope.symbols:
+                current_symbol = current_symbol.scope.symbols[attr]
                 
-        # 如果以上步骤失败，保持原样
+                # 检查是否需要转换为简单名称
+                if i == len(attrs) - 1:  # 最后一个属性
+                    if current_symbol.qname in self.name_mappings:
+                        new_name = self.name_mappings[current_symbol.qname]
+                        return ast.Name(id=new_name, ctx=node.ctx)
+            else:
+                # 无法继续解析，保持原样
+                break
+                
+        # 如果无法完全解析，递归处理子节点
         return self.generic_visit(node)
         
     def visit_Global(self, node: ast.Global):
