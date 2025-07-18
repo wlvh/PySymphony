@@ -480,13 +480,13 @@ class ContextAwareVisitor(ast.NodeVisitor):
         
         # 处理装饰器
         for decorator in node.decorator_list:
-            decorator_symbols = self.collect_dependencies_from_node(decorator)
+            decorator_symbols = self.analyze_dependencies(decorator)
             symbol.decorators.extend(decorator_symbols)
             symbol.dependencies.update(decorator_symbols)
             
         # 处理基类
         for base in node.bases:
-            base_symbols = self.collect_dependencies_from_node(base)
+            base_symbols = self.analyze_dependencies(base)
             symbol.dependencies.update(base_symbols)
             
         # 注册符号
