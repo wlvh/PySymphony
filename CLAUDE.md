@@ -12,25 +12,29 @@ This is a Python code merging tool project that implements utilities for flatten
 /Demo/
 ├── scripts/                 # Main scripts directory
 │   ├── __init__.py          # Package marker (empty)
-│   ├── my_scripts.py        # Main demo script that imports from test fixtures
 │   └── advanced_merge.py    # 🚀 The code merger with comprehensive AST analysis
-├── tests/                   # All test files
+├── examples/                # Example scripts and demo packages
 │   ├── __init__.py          # Package marker (empty)
-│   ├── fixtures/            # Test fixtures (demo packages)
+│   ├── demo_packages/       # Demo packages for examples
 │   │   ├── __init__.py      # Package marker (empty)
 │   │   ├── a_pkg/           # Demo package A
 │   │   │   ├── __init__.py  # (empty)
 │   │   │   └── a.py         # Contains global_same(), hello(), hello2() functions
-│   │   ├── b_pkg/           # Demo package B
-│   │   │   ├── __init__.py  # (empty)
-│   │   │   └── b.py         # Contains global_same(), b_hello() functions, imports from a_pkg
+│   │   └── b_pkg/           # Demo package B
+│   │       ├── __init__.py  # (empty)
+│   │       └── b.py         # Contains global_same(), b_hello() functions, imports from a_pkg
+│   ├── my_scripts.py        # Main demo script that imports from demo_packages
+│   ├── example_complex_deps.py  # Example showing complex dependency handling
+│   └── example_smart_rename.py  # Example showing smart renaming and ordering
+├── tests/                   # Test files (actual pytest tests)
+│   ├── __init__.py          # Package marker (empty)
+│   ├── fixtures/            # Test fixtures
+│   │   ├── __init__.py      # Package marker (empty)
 │   │   └── test_pkg/        # Test packages for advanced features
 │   │       ├── __init__.py  # (empty)
 │   │       ├── unique_func.py    # Test cases for smart renaming
 │   │       ├── order_test.py     # Test cases for dependency ordering
 │   │       └── complex_deps.py   # Complex multi-layer dependency tests
-│   ├── test_complex.py      # Test script for complex dependencies
-│   ├── test_issues.py       # Test script for smart renaming and ordering
 │   ├── test_regression.py   # Regression tests
 │   └── test_advanced_merger_fixes.py  # Tests for advanced merger fixes
 ├── conftest.py              # Pytest configuration
@@ -47,40 +51,43 @@ This is a Python code merging tool project that implements utilities for flatten
   - **Correct nonlocal/global handling**: Properly tracks and preserves scope declarations
   - **Import alias mapping**: Complete support for all import patterns and aliases
 
-### Demo Code
-- **`tests/fixtures/a_pkg/a.py`**: Contains `global_same()`, `hello()`, `hello2()` - demonstrates internal dependencies
-- **`tests/fixtures/b_pkg/b.py`**: Contains `global_same()`, `b_hello()` - demonstrates cross-module imports with aliases
-- **`scripts/my_scripts.py`**: Main demo script importing from both packages
+### Example Code
+- **`examples/demo_packages/a_pkg/a.py`**: Contains `global_same()`, `hello()`, `hello2()` - demonstrates internal dependencies
+- **`examples/demo_packages/b_pkg/b.py`**: Contains `global_same()`, `b_hello()` - demonstrates cross-module imports with aliases
+- **`examples/my_scripts.py`**: Main demo script importing from both demo packages
+- **`examples/example_complex_deps.py`**: Example showing how the merger handles complex dependencies
+- **`examples/example_smart_rename.py`**: Example demonstrating smart renaming and ordering features
 
 ### Test Code
-- **`tests/fixtures/test_pkg/unique_func.py`**: Functions with unique names that shouldn't be renamed
-- **`tests/fixtures/test_pkg/order_test.py`**: Multi-level dependencies to test correct ordering
-- **`tests/fixtures/test_pkg/complex_deps.py`**: Complex dependency chains for advanced testing
+- **`tests/fixtures/test_pkg/`**: Test fixtures used by actual pytest tests
+  - `unique_func.py`: Functions with unique names that shouldn't be renamed
+  - `order_test.py`: Multi-level dependencies to test correct ordering
+  - `complex_deps.py`: Complex dependency chains for advanced testing
 - **`tests/test_advanced_merger_fixes.py`**: Comprehensive tests for advanced merger fixes
 - **`tests/test_regression.py`**: Regression tests to ensure stability
-- **`tests/test_complex.py`**: Tests for complex dependency scenarios
-- **`tests/test_issues.py`**: Tests for specific issue resolutions
 
 ## Development Commands
 
 This project lacks standard Python configuration files (no requirements.txt, setup.py, pyproject.toml). To work with the code:
 
 ```bash
-# Run the main demo script (requires PYTHONPATH)
-PYTHONPATH=. python scripts/my_scripts.py
+# Run example scripts (requires PYTHONPATH)
+PYTHONPATH=examples python examples/my_scripts.py
+PYTHONPATH=. python examples/example_complex_deps.py
+PYTHONPATH=. python examples/example_smart_rename.py
 
-# Run the code merger tool
-python scripts/advanced_merge.py scripts/my_scripts.py .
+# Run the code merger tool on examples
+python scripts/advanced_merge.py examples/my_scripts.py examples
+python scripts/advanced_merge.py examples/example_complex_deps.py .
 
-# Run test scripts as modules (for relative imports)
-PYTHONPATH=. python -m tests.test_complex
-PYTHONPATH=. python -m tests.test_issues
+# Run pytest (only runs actual tests, not examples)
+pytest
 ```
 
 ### Import Structure
-- Scripts in `scripts/` use absolute imports: `from tests.fixtures.a_pkg.a import hello`
-- Test fixtures use relative imports: `from ..a_pkg.a import hello2`
-- Test files use relative imports: `from .fixtures.test_pkg.complex_deps import main_handler`
+- Example scripts use absolute imports appropriate to their location
+- Demo packages use relative imports within the package structure
+- Test files are properly isolated in the `tests/` directory
 - The `conftest.py` automatically sets up PYTHONPATH for pytest
 
 ## 🚀 Advanced Merge Tool Features
@@ -112,21 +119,23 @@ PYTHONPATH=. python -m tests.test_issues
 ### Usage
 ```bash
 python scripts/advanced_merge.py <script_path> <project_root>
+# Output: The merged file will be created in the same directory as the source script,
+# with '_advanced_merged.py' appended to the filename.
 ```
 
 ### Examples
 ```bash
 # Merge the demo script
-python scripts/advanced_merge.py scripts/my_scripts.py .
-# Output: scripts/my_scripts_advanced_merged.py
+python scripts/advanced_merge.py examples/my_scripts.py examples
+# Output: examples/my_scripts_advanced_merged.py
 
-# Test smart renaming and dependency ordering
-python scripts/advanced_merge.py tests/test_issues.py .
-# Output: tests/test_issues_advanced_merged.py
+# Merge example showing smart renaming
+python scripts/advanced_merge.py examples/example_smart_rename.py .
+# Output: examples/example_smart_rename_advanced_merged.py
 
-# Test complex dependency chains
-python scripts/advanced_merge.py tests/test_complex.py .
-# Output: tests/test_complex_advanced_merged.py
+# Merge example with complex dependencies
+python scripts/advanced_merge.py examples/example_complex_deps.py .
+# Output: examples/example_complex_deps_advanced_merged.py
 ```
 
 ### Technical Implementation
@@ -148,45 +157,45 @@ The demo packages showcase complex dependency scenarios that the merger tool han
 
 ### Cross-package Dependencies
 ```python
-# tests/fixtures/a_pkg/a.py
+# examples/demo_packages/a_pkg/a.py
 def global_same():     # Function with same name as in b_pkg
 def hello():           # Calls global_same() internally  
 def hello2():          # Also calls global_same() internally
 
-# tests/fixtures/b_pkg/b.py  
+# examples/demo_packages/b_pkg/b.py  
 from ..a_pkg.a import hello2                    # Relative import
 from ..a_pkg.a import global_same as global_same_a  # Relative import with alias
 def global_same():     # Same name as in a_pkg (conflict!)
 def b_hello():         # Calls hello2(), global_same(), global_same_a()
 
-# scripts/my_scripts.py
-from tests.fixtures.a_pkg.a import hello     # Import from first package
-from tests.fixtures.b_pkg.b import b_hello   # Import from second package
+# examples/my_scripts.py
+from demo_packages.a_pkg.a import hello     # Import from first package
+from demo_packages.b_pkg.b import b_hello   # Import from second package
 ```
 
 ### How Advanced Merger Resolves This
 ```python
-# Output: scripts/my_scripts_advanced_merged.py
-# From tests/fixtures/a_pkg/a.py
+# Output: examples/my_scripts_advanced_merged.py
+# From examples/demo_packages/a_pkg/a.py
 def a_pkg_a_global_same():    # Only renamed due to conflict with b_pkg version
     print('Global same in a')
 
-# From tests/fixtures/a_pkg/a.py
+# From examples/demo_packages/a_pkg/a.py
 def hello2():
     print('Hello World2')
     a_pkg_a_global_same()
 
-# From tests/fixtures/b_pkg/b.py
+# From examples/demo_packages/b_pkg/b.py
 def b_pkg_b_global_same():    # Only renamed due to conflict with a_pkg version
     print('Global same in b')
 
-# From tests/fixtures/b_pkg/b.py
+# From examples/demo_packages/b_pkg/b.py
 def b_hello():
     hello2()
     b_pkg_b_global_same()     # Calls its own global_same
     a_pkg_a_global_same()     # Calls aliased function correctly
 
-# From tests/fixtures/a_pkg/a.py
+# From examples/demo_packages/a_pkg/a.py
 def hello():
     print('Hello World')
     a_pkg_a_global_same()
@@ -198,7 +207,7 @@ if __name__ == '__main__':
 
 ### Smart Renaming Examples
 ```python
-# Output: tests/test_issues_advanced_merged.py
+# Output: examples/example_smart_rename_advanced_merged.py
 # From tests/fixtures/test_pkg/order_test.py
 def level_3_func():                         # Keeps original name (no conflict)
     """第三层函数，不依赖其他函数"""
@@ -221,7 +230,7 @@ def unique_function():                      # Keeps original name (no conflict)
 
 ### Dependency Ordering Examples
 ```python
-# Output: tests/test_complex_advanced_merged.py (correct order)
+# Output: examples/example_complex_deps_advanced_merged.py (correct order)
 # From tests/fixtures/test_pkg/complex_deps.py
 def base_util():              # Level 0: No dependencies
     return 'base'
