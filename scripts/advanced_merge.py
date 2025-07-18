@@ -16,6 +16,7 @@ import ast
 import copy
 import os
 import sys
+import argparse
 from pathlib import Path
 from typing import Set, Dict, List, Tuple, Optional, Union, Any
 from dataclasses import dataclass, field
@@ -770,57 +771,38 @@ class AdvancedCodeMerger:
         self.name_mappings: Dict[str, str] = {}  # qname -> new_name
         
     def analyze_entry_script(self, script_path: Path) -> Tuple[Set[Symbol], List[ast.AST]]:
-        """分析入口脚本，返回初始符号集和主代码"""
+        """
+        分析入口脚本，返回初始符号集和主代码。
+        [修正] 依赖 visitor 的单次遍历结果，而不是进行二次的无上下文分析。
+        """
+        # 1. 执行唯一且完整的分析过程，此过程会填充 visitor 的所有状态
         self.visitor.analyze_module(script_path)
-        
+
         initial_symbols = set()
         main_code = []
-        
-        with open(script_path, 'r', encoding='utf-8') as f:
-            content = f.read()
+
+        # 2. 从已经分析完成的 visitor 中获取入口模块的信息
+        module_qname = self.visitor.get_module_qname(script_path)
+        if module_qname not in self.visitor.all_symbols:
+            return initial_symbols, main_code
+
+        module_symbol = self.visitor.all_symbols[module_qname]
+        module_scope = module_symbol.scope
+
+        # 3. 获取主代码（即模块的初始化语句，包括 __main__ 块）
+        main_code = module_symbol.init_statements
+
+        # 4. 在正确的模块作用域下，分析主代码中使用的依赖项
+        for node in main_code:
+            # 关键修复：调用 analyze_dependencies 时，传入正确的父作用域 (parent_scope)
+            deps = self.visitor.analyze_dependencies(node, parent_scope=module_scope)
+            initial_symbols.update(deps)
+
+        # 5. 额外收集在入口脚本中通过 'from ... import ...' 直接导入的符号
+        for symbol in module_scope.symbols.values():
+            if symbol.symbol_type == 'import_alias':
+                initial_symbols.add(symbol)
             
-        tree = ast.parse(content, filename=str(script_path))
-        
-        # 分析入口脚本的每个语句
-        for node in tree.body:
-            if isinstance(node, (ast.Import, ast.ImportFrom)):
-                # 导入语句 - 收集导入的符号
-                if isinstance(node, ast.ImportFrom) and node.module == '__future__':
-                    continue  # __future__ 导入已经被收集
-                    
-                # 直接从作用域中查找导入创建的符号
-                module_qname = self.visitor.get_module_qname(script_path)
-                module_scope = None
-                for scope in self.visitor.scope_stack:
-                    if scope.module_path == script_path:
-                        module_scope = scope
-                        break
-                        
-                if not module_scope:
-                    # 从保存的模块作用域中查找
-                    if script_path in self.visitor.module_symbols:
-                        module_scope = self.visitor.module_symbols[script_path].get('__scope__')
-                            
-                if module_scope:
-                    # 查找导入创建的别名符号
-                    if isinstance(node, ast.ImportFrom):
-                        for alias in node.names:
-                            alias_name = alias.asname or alias.name
-                            if alias_name in module_scope.symbols:
-                                initial_symbols.add(module_scope.symbols[alias_name])
-                    elif isinstance(node, ast.Import):
-                        for alias in node.names:
-                            alias_name = alias.asname or alias.name.split('.')[-1]
-                            if alias_name in module_scope.symbols:
-                                initial_symbols.add(module_scope.symbols[alias_name])
-            else:
-                # 其他语句 - 分析其中使用的符号
-                main_code.append(node)
-                
-                # 收集主代码中引用的符号
-                deps = self.visitor.analyze_dependencies(node)
-                initial_symbols.update(deps)
-                        
         return initial_symbols, main_code
         
     def collect_all_dependencies(self, initial_symbols: Set[Symbol]) -> Set[Symbol]:
@@ -910,6 +892,47 @@ class AdvancedCodeMerger:
                 # 无冲突，保持原名
                 self.name_mappings[symbol.qname] = symbol.name
                 
+    def _static_verify(self, merged_code: str) -> Dict[str, List[str]]:
+        """
+        对合并结果做静态扫描，返回问题字典。
+        """
+        try:
+            tree = ast.parse(merged_code)
+        except SyntaxError as e:
+            return {'syntax_error': [str(e)]}
+
+        defined = set()
+        # 收集所有定义
+        for n in ast.walk(tree):
+            if isinstance(n, (ast.FunctionDef, ast.ClassDef, ast.AsyncFunctionDef)):
+                defined.add(n.name)
+            elif isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name):
+                defined.add(n.targets[0].id)
+            elif isinstance(n, ast.Import):
+                for alias in n.names:
+                    defined.add(alias.asname or alias.name.split('.')[-1])
+            elif isinstance(n, ast.ImportFrom):
+                for alias in n.names:
+                    defined.add(alias.asname or alias.name)
+        
+        # 收集所有使用
+        used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+        
+        # Python 内置函数和关键字不应被视为未定义
+        builtin_names = set(dir(__builtins__))
+        undefined = sorted((used - defined) - builtin_names)
+
+        # 文本级查找重复导入
+        imports_seen, duplicates = set(), []
+        for line in merged_code.splitlines():
+            stripped_line = line.strip()
+            if stripped_line.startswith(('import ', 'from ')):
+                if stripped_line in imports_seen:
+                    duplicates.append(stripped_line)
+                imports_seen.add(stripped_line)
+
+        return {'undefined_names': undefined, 'duplicate_imports': duplicates, 'syntax_error': []}
+
     def merge_script(self, script_path: Path) -> str:
         """合并脚本"""
         script_path = script_path.resolve()
@@ -989,7 +1012,23 @@ class AdvancedCodeMerger:
                 transformed = transformer.visit(copy.deepcopy(node))
                 result_lines.append(ast.unparse(transformed))
                 
-        return "\n".join(result_lines)
+        final_code = "\n".join(result_lines)
+
+        if getattr(self, "enable_verify", False):
+            problems = self._static_verify(final_code)
+            if any(problems.values()):
+                print("\n--- ⚠️  静态自检发现问题 ---")
+                if problems.get('syntax_error'):
+                    print(f"  致命语法错误: {problems['syntax_error'][0]}")
+                if problems.get('undefined_names'):
+                    print(f"  可能未定义的符号: {problems['undefined_names']}")
+                if problems.get('duplicate_imports'):
+                    print("  重复的导入语句:")
+                    for line in sorted(list(set(problems['duplicate_imports']))):
+                        print(f"    {line}")
+                print("---------------------------\n")
+
+        return final_code
 
 
 class AdvancedNodeTransformer(ast.NodeTransformer):
@@ -1279,12 +1318,15 @@ class AdvancedNodeTransformer(ast.NodeTransformer):
 
 def main():
     """主函数"""
-    if len(sys.argv) < 3:
-        print("Usage: python advanced_merge.py <script_path> <project_root>")
-        sys.exit(1)
-        
-    script_path = Path(sys.argv[1])
-    project_root = Path(sys.argv[2])
+    parser = argparse.ArgumentParser(description="高级Python代码合并工具")
+    parser.add_argument('script_path', type=Path, help='入口脚本路径')
+    parser.add_argument('project_root', type=Path, help='项目根目录')
+    parser.add_argument('--verify', action='store_true', default=True, help='静态检查合并结果 (默认开启)')
+    parser.add_argument('--no-verify', action='store_false', dest='verify', help='禁用静态检查')
+    args = parser.parse_args()
+    
+    script_path = args.script_path
+    project_root = args.project_root
     
     if not script_path.exists():
         print(f"Error: Script {script_path} not found")
@@ -1296,6 +1338,8 @@ def main():
         
     try:
         merger = AdvancedCodeMerger(project_root)
+        # 将命令行参数传递给实例
+        merger.enable_verify = args.verify 
         merged_code = merger.merge_script(script_path)
         
         # 输出到文件
