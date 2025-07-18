@@ -1,6 +1,5 @@
-from tests.fixtures.a_pkg.a import hello2
-
-from tests.fixtures.a_pkg.a import global_same as global_same_a
+from ..a_pkg.a import hello2
+from ..a_pkg.a import global_same as global_same_a
 
 
 def global_same():

@@ -4,8 +4,8 @@
 2. 函数定义顺序问题
 """
 
-from tests.fixtures.test_pkg.unique_func import unique_function, another_unique
-from tests.fixtures.test_pkg.order_test import level_1_func
+from .fixtures.test_pkg.unique_func import unique_function, another_unique
+from .fixtures.test_pkg.order_test import level_1_func
 
 if __name__ == '__main__':
     print("=== 测试独特函数 ===")

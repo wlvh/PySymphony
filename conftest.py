@@ -2,6 +2,7 @@
 import pytest
 import subprocess
 import sys
+import os
 from pathlib import Path
 import shutil
 
@@ -38,12 +39,17 @@ def run_script(tmp_path, request):
             cmd = [sys.executable, str(merge_script), str(script_path), str(project_root)]
             
             try:
+                # 设置环境变量，确保能找到 tests 目录
+                env = dict(os.environ)
+                env['PYTHONPATH'] = str(ROOT) + os.pathsep + env.get('PYTHONPATH', '')
+                
                 result = subprocess.run(
                     cmd,
                     cwd=ROOT,
                     capture_output=True,
                     text=True,
-                    check=True
+                    check=True,
+                    env=env
                 )
                 
                 # 查找生成的合并文件
@@ -60,11 +66,16 @@ def run_script(tmp_path, request):
         
         # 运行脚本
         cmd = [sys.executable, str(script_path)]
+        # 设置环境变量，确保能找到 tests 目录
+        env = dict(os.environ)
+        env['PYTHONPATH'] = str(ROOT) + os.pathsep + env.get('PYTHONPATH', '')
+        
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            cwd=script_path.parent
+            cwd=script_path.parent,
+            env=env
         )
         
         if result.returncode != 0:
