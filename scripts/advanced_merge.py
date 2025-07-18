@@ -798,9 +798,9 @@ class AdvancedCodeMerger:
             deps = self.visitor.analyze_dependencies(node, parent_scope=module_scope)
             initial_symbols.update(deps)
 
-        # 5. 额外收集在入口脚本中通过 'from ... import ...' 直接导入的符号
+        # 5. 收集在入口脚本中定义的所有符号（包括导入别名、函数、类等）
         for symbol in module_scope.symbols.values():
-            if symbol.symbol_type == 'import_alias':
+            if symbol.symbol_type in ('import_alias', 'function', 'class', 'variable'):
                 initial_symbols.add(symbol)
             
         return initial_symbols, main_code
@@ -899,7 +899,7 @@ class AdvancedCodeMerger:
         try:
             tree = ast.parse(merged_code)
         except SyntaxError as e:
-            return {'syntax_error': [str(e)]}
+            return {'syntax_error': [str(e)], 'undefined_names': [], 'duplicate_imports': []}
 
         defined = set()
         # 收集所有定义
@@ -1023,9 +1023,28 @@ class AdvancedCodeMerger:
                 if problems.get('undefined_names'):
                     print(f"  可能未定义的符号: {problems['undefined_names']}")
                 if problems.get('duplicate_imports'):
-                    print("  重复的导入语句:")
+                    print("  重复的导入语句 (将自动修复):")
                     for line in sorted(list(set(problems['duplicate_imports']))):
                         print(f"    {line}")
+                    
+                    # 自动修复：去除重复的导入
+                    lines = final_code.splitlines()
+                    seen_imports = set()
+                    cleaned_lines = []
+                    
+                    for line in lines:
+                        stripped = line.strip()
+                        if stripped.startswith(('import ', 'from ')):
+                            if stripped not in seen_imports:
+                                seen_imports.add(stripped)
+                                cleaned_lines.append(line)
+                            # 如果是重复的导入，跳过这一行
+                        else:
+                            cleaned_lines.append(line)
+                    
+                    final_code = "\n".join(cleaned_lines)
+                    print("  ✅ 已自动去除重复的导入语句")
+                    
                 print("---------------------------\n")
 
         return final_code
@@ -1321,8 +1340,13 @@ def main():
     parser = argparse.ArgumentParser(description="高级Python代码合并工具")
     parser.add_argument('script_path', type=Path, help='入口脚本路径')
     parser.add_argument('project_root', type=Path, help='项目根目录')
-    parser.add_argument('--verify', action='store_true', default=True, help='静态检查合并结果 (默认开启)')
-    parser.add_argument('--no-verify', action='store_false', dest='verify', help='禁用静态检查')
+    
+    # 使用互斥组来处理 verify 选项
+    verify_group = parser.add_mutually_exclusive_group()
+    verify_group.add_argument('--verify', action='store_true', help='启用静态检查')
+    verify_group.add_argument('--no-verify', action='store_false', dest='verify', help='禁用静态检查')
+    parser.set_defaults(verify=True)  # 默认启用验证
+    
     args = parser.parse_args()
     
     script_path = args.script_path
