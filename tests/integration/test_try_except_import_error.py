@@ -107,13 +107,12 @@ if __name__ == "__main__":
             '{"name":"test","value":42}' in result.stdout or
             '{"value":42,"name":"test"}' in result.stdout)
     
-    # 暂时跳过 ASTAuditor 验证
-    # ASTAuditor 需要改进来理解 try...except ImportError 模式中的"重复定义"是预期行为
-    # from pysymphony.auditor import ASTAuditor
-    # auditor = ASTAuditor()
-    # with open(output_file, 'r') as f:
-    #     audit_result = auditor.audit(f.read(), str(output_file))
-    # assert audit_result, "ASTAuditor found errors in merged code"
+    # 验证 ASTAuditor 通过
+    from pysymphony.auditor import ASTAuditor
+    auditor = ASTAuditor()
+    with open(output_file, 'r') as f:
+        audit_result = auditor.audit(f.read(), str(output_file))
+    assert audit_result, f"ASTAuditor found errors in merged code: {auditor.get_report()}"
 
 
 def test_try_except_import_error_with_internal_modules(tmp_path):
@@ -224,13 +223,12 @@ if __name__ == "__main__":
     assert "Result:" in result.stdout, "Expected output not found"
     assert "Implementation:" in result.stdout, "Implementation info not found"
     
-    # 暂时跳过 ASTAuditor 验证
-    # ASTAuditor 需要改进来理解 try...except ImportError 模式中的"重复定义"是预期行为
-    # from pysymphony.auditor import ASTAuditor
-    # auditor = ASTAuditor()
-    # with open(output_file, 'r') as f:
-    #     audit_result = auditor.audit(f.read(), str(output_file))
-    # assert audit_result, "ASTAuditor found errors in merged code"
+    # 验证 ASTAuditor 通过
+    from pysymphony.auditor import ASTAuditor
+    auditor = ASTAuditor()
+    with open(output_file, 'r') as f:
+        audit_result = auditor.audit(f.read(), str(output_file))
+    assert audit_result, f"ASTAuditor found errors in merged code: {auditor.get_report()}"
 
 
 def test_nested_try_except_import_error(tmp_path):
@@ -332,13 +330,12 @@ if __name__ == "__main__":
     assert result.returncode == 0, f"Merged script failed to run: {result.stderr}"
     assert "Config format:" in result.stdout, "Expected output not found"
     
-    # 暂时跳过 ASTAuditor 验证
-    # ASTAuditor 需要改进来理解 try...except ImportError 模式中的"重复定义"是预期行为
-    # from pysymphony.auditor import ASTAuditor
-    # auditor = ASTAuditor()
-    # with open(output_file, 'r') as f:
-    #     audit_result = auditor.audit(f.read(), str(output_file))
-    # assert audit_result, "ASTAuditor found errors in merged code"
+    # 验证 ASTAuditor 通过
+    from pysymphony.auditor import ASTAuditor
+    auditor = ASTAuditor()
+    with open(output_file, 'r') as f:
+        audit_result = auditor.audit(f.read(), str(output_file))
+    assert audit_result, f"ASTAuditor found errors in merged code: {auditor.get_report()}"
 
 
 if __name__ == "__main__":
