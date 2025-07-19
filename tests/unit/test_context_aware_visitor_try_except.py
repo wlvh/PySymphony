@@ -57,10 +57,10 @@ except ImportError:
         # 退出作用域
         self.visitor.pop_scope()
         
-        # 验证外部导入被正确记录
-        # 注意：当前实现不会处理 try 块中的所有分支，这是我们需要修复的问题
-        # 至少应该有一些导入被记录
-        assert len(self.visitor.external_imports) > 0, "Should have some external imports"
+        # 验证外部导入的处理
+        # 在 try...except ImportError 块中的导入不应该被添加到 external_imports
+        # 因为它们会作为初始化语句保留在原始的 try...except 结构中
+        assert len(self.visitor.external_imports) == 0, "try...except ImportError imports should not be in external_imports"
         
         # 验证别名被正确处理
         module_symbols = self.visitor.module_symbols[module_path]
@@ -161,9 +161,9 @@ except ImportError:
         # 退出作用域
         self.visitor.pop_scope()
         
-        # 验证所有外部导入被记录
-        # 当前实现可能不会处理所有分支
-        assert len(self.visitor.external_imports) > 0, "Should have some external imports"
+        # 验证外部导入的处理
+        # 在 try...except ImportError 块中的导入不应该被添加到 external_imports
+        assert len(self.visitor.external_imports) == 0, "try...except ImportError imports should not be in external_imports"
         
         # 验证变量被记录
         module_symbols = self.visitor.module_symbols[module_path]
@@ -236,9 +236,9 @@ except ImportError:
         # 退出作用域
         self.visitor.pop_scope()
         
-        # 验证外部导入
-        # 当前实现应该至少记录一些导入
-        assert len(self.visitor.external_imports) > 0, "Should have some external imports"
+        # 验证外部导入的处理
+        # 在 try...except ImportError 块中的导入不应该被添加到 external_imports
+        assert len(self.visitor.external_imports) == 0, "try...except ImportError imports should not be in external_imports"
         
         # 验证别名被正确记录
         module_symbols = self.visitor.module_symbols[module_path]

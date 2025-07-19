@@ -60,6 +60,7 @@ class Symbol:
     decorators: List['Symbol'] = field(default_factory=list)  # 装饰器符号
     init_statements: List[ast.AST] = field(default_factory=list)  # 模块级初始化语句
     export_list: List[str] = field(default_factory=list)  # __all__ 的导出列表
+    is_runtime_import: bool = False  # 是否是在 try...except ImportError 块中的导入
 
     def __hash__(self):
         return hash((self.qname, id(self.scope)))
@@ -312,8 +313,15 @@ class ContextAwareVisitor(ast.NodeVisitor):
                 # 内部模块
                 module_path = self.resolve_module_path(module_name)
                 if module_path:
-                    # 递归分析
-                    self.analyze_module(module_path)
+                    try:
+                        # 递归分析
+                        self.analyze_module(module_path)
+                    except (FileNotFoundError, OSError):
+                        # 如果在 try...except ImportError 块中，静默跳过文件不存在的错误
+                        if not self.in_try_import_error:
+                            # 如果不在 try...except ImportError 块中，重新抛出异常
+                            raise
+                        # 否则继续执行，仍然创建导入别名符号
                     
                     # 创建导入别名符号
                     symbol = Symbol(
@@ -321,7 +329,8 @@ class ContextAwareVisitor(ast.NodeVisitor):
                         qname=f"{self.get_module_qname(self.current_module_path)}.{alias_name}",
                         symbol_type='import_alias',
                         def_node=node,
-                        scope=self.current_scope()
+                        scope=self.current_scope(),
+                        is_runtime_import=self.in_try_import_error
                     )
                     
                     # 添加对模块符号的依赖
@@ -333,6 +342,19 @@ class ContextAwareVisitor(ast.NodeVisitor):
                     self.all_symbols[symbol.qname] = symbol
             else:
                 # 外部导入
+                # 创建导入别名符号（即使是外部导入）
+                symbol = Symbol(
+                    name=alias_name,
+                    qname=f"{self.get_module_qname(self.current_module_path)}.{alias_name}",
+                    symbol_type='import_alias',
+                    def_node=node,
+                    scope=self.current_scope(),
+                    is_runtime_import=self.in_try_import_error
+                )
+                
+                self.current_scope().symbols[alias_name] = symbol
+                self.all_symbols[symbol.qname] = symbol
+                
                 # 如果在 try...except ImportError 块中，不要添加到外部导入列表
                 if not self.in_try_import_error:
                     if alias.asname:
@@ -366,8 +388,16 @@ class ContextAwareVisitor(ast.NodeVisitor):
             module_path = self.resolve_module_path(module_name)
             
         if module_path and self.is_internal_module(module_name, self.current_module_path, level):
-            # 内部模块 - 即使在 try...except ImportError 块中也要分析
-            self.analyze_module(module_path)
+            # 内部模块
+            try:
+                # 尝试分析内部模块
+                self.analyze_module(module_path)
+            except (FileNotFoundError, OSError):
+                # 如果在 try...except ImportError 块中，静默跳过文件不存在的错误
+                if not self.in_try_import_error:
+                    # 如果不在 try...except ImportError 块中，重新抛出异常
+                    raise
+                # 否则继续执行，仍然创建导入别名符号
             
             for alias in node.names:
                 symbol_name = alias.name
@@ -379,7 +409,8 @@ class ContextAwareVisitor(ast.NodeVisitor):
                     qname=f"{self.get_module_qname(self.current_module_path)}.{alias_name}",
                     symbol_type='import_alias', 
                     def_node=node,
-                    scope=self.current_scope()
+                    scope=self.current_scope(),
+                    is_runtime_import=self.in_try_import_error  # 标记是否在 try...except ImportError 块中
                 )
                 
                 # 找到被导入的原始符号
@@ -392,6 +423,27 @@ class ContextAwareVisitor(ast.NodeVisitor):
                 self.module_symbols[self.current_module_path][alias_name] = symbol
         else:
             # 外部导入
+            # 始终为导入创建符号，以便正确跟踪依赖关系
+            for alias in node.names:
+                symbol_name = alias.name
+                alias_name = alias.asname or symbol_name
+                
+                # 创建导入别名符号（即使是外部导入）
+                symbol = Symbol(
+                    name=alias_name,
+                    qname=f"{self.get_module_qname(self.current_module_path)}.{alias_name}",
+                    symbol_type='import_alias',
+                    def_node=node,
+                    scope=self.current_scope(),
+                    is_runtime_import=self.in_try_import_error
+                )
+                
+                # 对于外部导入，我们不设置依赖关系
+                # 但仍然注册符号
+                self.current_scope().symbols[alias_name] = symbol
+                self.all_symbols[symbol.qname] = symbol
+                self.module_symbols[self.current_module_path][alias_name] = symbol
+            
             # 如果在 try...except ImportError 块中，不要添加到外部导入列表
             if not self.in_try_import_error:
                 for alias in node.names:
@@ -747,6 +799,21 @@ class ContextAwareVisitor(ast.NodeVisitor):
                 
         return ""
     
+    def visit_Try(self, node: ast.Try):
+        """正确管理 try...except 块的访问状态"""
+        # 保存进入此节点前的状态
+        original_state = self.in_try_import_error
+        
+        if self._is_try_import_error(node):
+            self.in_try_import_error = True
+
+        # 递归访问所有子节点
+        self.generic_visit(node)
+
+        # 离开此节点时，恢复原始状态，这对于处理嵌套至关重要
+        self.in_try_import_error = original_state
+        return node
+    
     def analyze_dependencies(self, node: ast.AST, parent_scope: Optional[Scope] = None) -> Set[Symbol]:
         """分析AST节点的依赖，使用作用域栈"""
         if parent_scope:
@@ -835,7 +902,21 @@ class ContextAwareVisitor(ast.NodeVisitor):
                 pass
                 
         analyzer = LocalDependencyAnalyzer(self)
-        analyzer.visit(node)
+        
+        # 特殊处理 try...except ImportError 块
+        if isinstance(node, ast.Try) and self._is_try_import_error(node):
+            # 对于 try...except ImportError 块，我们需要收集所有可能的依赖
+            # 包括 try 块和 except 块中的所有导入
+            for stmt in node.body:
+                analyzer.visit(stmt)
+            for handler in node.handlers:
+                for stmt in handler.body:
+                    analyzer.visit(stmt)
+            # 注意：我们还需要确保所有被导入的模块中的符号都被包含
+            # 这将在后续的依赖收集中处理
+        else:
+            analyzer.visit(node)
+        
         dependencies = analyzer.deps
                         
         if parent_scope:
@@ -931,6 +1012,72 @@ class AdvancedCodeMerger:
                 class_qname = sym.qname.rsplit('.', 1)[0]
                 self.class_children[class_qname].append(sym)
     
+    def _collect_try_except_import_dependencies(self) -> Set[Symbol]:
+        """收集所有 try...except ImportError 块中导入的模块的符号"""
+        additional_deps = set()
+        
+        # 遍历所有模块的初始化语句
+        for module_symbol in self.visitor.all_symbols.values():
+            if module_symbol.symbol_type == 'module' and module_symbol.init_statements:
+                for stmt in module_symbol.init_statements:
+                    if isinstance(stmt, ast.Try) and self.visitor._is_try_import_error(stmt):
+                        # 收集 try 块和 except 块中的所有导入
+                        for try_stmt in stmt.body:
+                            if isinstance(try_stmt, (ast.Import, ast.ImportFrom)):
+                                # 获取导入的模块名
+                                if isinstance(try_stmt, ast.Import):
+                                    for alias in try_stmt.names:
+                                        module_name = alias.name
+                                        module_qname = module_name
+                                        # 查找对应的模块符号
+                                        if module_qname in self.visitor.all_symbols:
+                                            module_sym = self.visitor.all_symbols[module_qname]
+                                            # 添加模块中的所有函数和类
+                                            for sym in self.visitor.all_symbols.values():
+                                                if sym.qname.startswith(module_qname + '.') and sym.symbol_type in ('function', 'class'):
+                                                    additional_deps.add(sym)
+                                elif isinstance(try_stmt, ast.ImportFrom):
+                                    # 处理 from ... import ... 语句
+                                    module_name = try_stmt.module or ''
+                                    level = try_stmt.level or 0
+                                    
+                                    # 解析模块路径
+                                    if level > 0:
+                                        module_path = self.visitor.resolve_relative_import(level, module_name, module_symbol.scope.module_path)
+                                    else:
+                                        module_path = self.visitor.resolve_module_path(module_name)
+                                    
+                                    if module_path:
+                                        module_qname = self.visitor.get_module_qname(module_path)
+                                        # 添加被导入的特定符号
+                                        for alias in try_stmt.names:
+                                            symbol_qname = f"{module_qname}.{alias.name}"
+                                            if symbol_qname in self.visitor.all_symbols:
+                                                additional_deps.add(self.visitor.all_symbols[symbol_qname])
+                        
+                        # 同样处理 except 块
+                        for handler in stmt.handlers:
+                            for except_stmt in handler.body:
+                                if isinstance(except_stmt, (ast.Import, ast.ImportFrom)):
+                                    # 使用相同的逻辑处理 except 块中的导入
+                                    if isinstance(except_stmt, ast.ImportFrom):
+                                        module_name = except_stmt.module or ''
+                                        level = except_stmt.level or 0
+                                        
+                                        if level > 0:
+                                            module_path = self.visitor.resolve_relative_import(level, module_name, module_symbol.scope.module_path)
+                                        else:
+                                            module_path = self.visitor.resolve_module_path(module_name)
+                                        
+                                        if module_path:
+                                            module_qname = self.visitor.get_module_qname(module_path)
+                                            for alias in except_stmt.names:
+                                                symbol_qname = f"{module_qname}.{alias.name}"
+                                                if symbol_qname in self.visitor.all_symbols:
+                                                    additional_deps.add(self.visitor.all_symbols[symbol_qname])
+        
+        return additional_deps
+    
     def collect_all_dependencies(self, initial_symbols: Set[Symbol]) -> Set[Symbol]:
         """递归收集所有依赖"""
         # 首先建立类-方法索引
@@ -938,6 +1085,10 @@ class AdvancedCodeMerger:
         
         needed = set()
         to_process = deque(initial_symbols)
+        
+        # 添加 try...except ImportError 块中的所有可能依赖
+        try_except_deps = self._collect_try_except_import_dependencies()
+        to_process.extend(try_except_deps)
         
         while to_process:
             symbol = to_process.popleft()
@@ -1417,6 +1568,10 @@ class AdvancedNodeTransformer(ast.NodeTransformer):
         """查找符号的限定名 - 保留用于向后兼容"""
         symbol = self.resolve_name_to_symbol(name)
         if symbol:
+            # 如果是运行时导入（在 try...except ImportError 块中），不解析依赖
+            if symbol.is_runtime_import:
+                return symbol.qname
+            
             if symbol.symbol_type == 'import_alias' and symbol.dependencies:
                 # 返回导入指向的真实符号的qname
                 for dep in symbol.dependencies:
@@ -1522,6 +1677,12 @@ class AdvancedNodeTransformer(ast.NodeTransformer):
     def visit_Name(self, node: ast.Name):
         """转换名称引用"""
         if isinstance(node.ctx, ast.Load):
+            # 先检查是否是运行时导入的符号
+            symbol = self.resolve_name_to_symbol(node.id)
+            if symbol and symbol.is_runtime_import:
+                # 运行时导入的符号保持原名，不进行转换
+                return node
+            
             # 查找符号的限定名
             qname = self.find_symbol_qname(node.id)
             if qname and qname in self.name_mappings:
@@ -1659,10 +1820,25 @@ class AdvancedNodeTransformer(ast.NodeTransformer):
     def visit_Try(self, node: ast.Try):
         """处理 try...except 语句
         
-        对于 AdvancedNodeTransformer，我们只需要正常转换内部的节点
+        对于 AdvancedNodeTransformer，我们需要正确处理内部的作用域
         """
-        # 使用默认的转换逻辑
-        self.generic_visit(node)
+        # 转换 try 块中的所有语句
+        node.body = [self.visit(stmt) for stmt in node.body]
+        
+        # 转换所有的 except 处理器
+        for handler in node.handlers:
+            if handler.type:
+                handler.type = self.visit(handler.type)
+            handler.body = [self.visit(stmt) for stmt in handler.body]
+        
+        # 转换 else 块（如果存在）
+        if node.orelse:
+            node.orelse = [self.visit(stmt) for stmt in node.orelse]
+        
+        # 转换 finally 块（如果存在）
+        if node.finalbody:
+            node.finalbody = [self.visit(stmt) for stmt in node.finalbody]
+        
         return node
 
 
