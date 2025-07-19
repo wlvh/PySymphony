@@ -5,55 +5,42 @@ import sys
 import os
 from pathlib import Path
 import shutil
-import warnings
+import ast
 import importlib.util
 
 # 项目根目录
 ROOT = Path(__file__).parent
-sys.path.insert(0, str(ROOT / "tests"))
 
-# 导入新的 AST 审计器
-from ast_auditor import ASTAuditor, audit_code
-
-def static_check(src: str, path: Path, is_main_script: bool = True):
-    """对生成的合并代码进行静态检查 - 使用新的 ASTAuditor"""
+def static_check(src: str, path: Path):
+    """对生成的合并代码进行静态检查 - 按照 issue #16 的要求"""
     
-    # 使用 ASTAuditor 进行全面的静态分析
-    audit_result = audit_code(src, filename=str(path), is_main_script=is_main_script)
+    # 1. 语法检查
+    try:
+        tree = ast.parse(src)
+    except SyntaxError as e:
+        pytest.fail(f'Syntax error in {path}: {e}')
     
-    # 如果有错误，生成详细的错误报告
-    if audit_result.has_errors:
-        error_report = [f"Static analysis errors in {path}:"]
-        for error in audit_result.errors:
-            error_report.append(f"  - {error}")
-        pytest.fail('\n'.join(error_report))
+    # 2. 检查重复的顶级定义
+    top_level_defs = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name in top_level_defs:
+                pytest.fail(
+                    f'Duplicate top-level definition in {path}: '
+                    f'"{node.name}" at line {node.lineno} '
+                    f'(previously defined at line {top_level_defs[node.name]})'
+                )
+            top_level_defs[node.name] = node.lineno
     
-    # 使用 pyflakes API 进行额外的检查（如果可用）
-    if importlib.util.find_spec("pyflakes") is not None:
-        try:
-            from pyflakes import api as pyflakes_api
-            from pyflakes.reporter import Reporter
-            import io
-            
-            # 捕获 pyflakes 输出
-            output = io.StringIO()
-            reporter = Reporter(output, output)
-            
-            # 运行 pyflakes 检查
-            pyflakes_api.check(src, str(path), reporter=reporter)
-            
-            # 检查是否有错误
-            pyflakes_output = output.getvalue()
-            if pyflakes_output:
-                pytest.fail(f'[pyflakes] static errors in {path}:\n{pyflakes_output}')
-                
-        except ImportError:
-            warnings.warn("pyflakes not installed - skipping additional checks")
+    # 3. 使用 flake8 进行 F 系列错误检查（强制要求）
+    result = subprocess.run(
+        [sys.executable, '-m', 'flake8', '--select=F', '--stdin-display-name', str(path), '-'],
+        input=src.encode(),
+        capture_output=True
+    )
     
-    # 记录警告（但不失败）
-    if audit_result.warnings:
-        for warning in audit_result.warnings:
-            warnings.warn(f"Static analysis warning: {warning}")
+    if result.returncode != 0:
+        pytest.fail(f'[flake8] static errors in {path}:\n{result.stdout.decode()}')
 
 def pytest_addoption(parser):
     """添加--merged命令行选项"""
