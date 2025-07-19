@@ -9,7 +9,7 @@ import ast
 import importlib.util
 
 # 导入 AST 审计器
-from tests.ast_auditor import ASTAuditor
+from pysymphony.auditor import ASTAuditor
 
 # 项目根目录
 ROOT = Path(__file__).parent
@@ -28,12 +28,15 @@ def static_check(src: str, path: Path):
     # 补充使用 pyflakes 进行额外检查（性能更好）
     try:
         import pyflakes.api
-        import pyflakes.messages
+        import pyflakes.reporter as reporter
         from io import StringIO
         
-        # 捕获 pyflakes 的输出
+        # 创建输出流和 reporter
         warnings = StringIO()
-        errors_found = pyflakes.api.check(src, str(path), reporter=lambda msg: warnings.write(str(msg) + '\n'))
+        warning_reporter = reporter.Reporter(warnings, warnings)
+        
+        # 检查代码
+        errors_found = pyflakes.api.check(src, str(path), reporter=warning_reporter)
         
         if errors_found:
             pytest.fail(f"[pyflakes] 额外的静态错误 in {path}:\n{warnings.getvalue()}")

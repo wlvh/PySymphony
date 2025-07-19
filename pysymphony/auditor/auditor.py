@@ -286,7 +286,51 @@ class ASTAuditor:
         # 添加其他模式检查的问题
         self.errors.extend(pattern_checker.issues)
         
+        # 后处理：检查顶层符号冲突（包括导入）
+        self._check_top_level_conflicts(tree)
+        
         return len(self.errors) == 0
+        
+    def _check_top_level_conflicts(self, tree: ast.AST):
+        """后处理：检查顶层符号冲突，包括导入"""
+        top_level_symbols: Dict[str, List[int]] = {}
+        
+        for node in tree.body:
+            symbol_key = None
+            
+            # 函数和类定义
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                symbol_key = node.name
+                
+            # Import 语句
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    imported_name = alias.asname if alias.asname else alias.name
+                    if imported_name in top_level_symbols:
+                        self.errors.append(
+                            f"顶层导入 '{imported_name}' 重复定义于第 {[top_level_symbols[imported_name][0], node.lineno]} 行"
+                        )
+                    else:
+                        top_level_symbols[imported_name] = [node.lineno]
+                        
+            # ImportFrom 语句
+            elif isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    imported_name = alias.asname if alias.asname else alias.name
+                    if imported_name in top_level_symbols:
+                        self.errors.append(
+                            f"顶层导入 '{imported_name}' 重复定义于第 {[top_level_symbols[imported_name][0], node.lineno]} 行"
+                        )
+                    else:
+                        top_level_symbols[imported_name] = [node.lineno]
+                        
+            # 如果有符号键，检查冲突
+            if symbol_key:
+                if symbol_key in top_level_symbols:
+                    # 已经在阶段一报告过，这里跳过
+                    pass
+                else:
+                    top_level_symbols[symbol_key] = [node.lineno]
         
     def get_report(self) -> str:
         """获取详细的审计报告"""
