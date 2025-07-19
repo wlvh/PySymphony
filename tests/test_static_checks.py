@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 import tempfile
 import subprocess
+import importlib.util
 
 # 添加项目根目录到 Python 路径
 ROOT = Path(__file__).parent.parent
@@ -101,10 +102,8 @@ async def async_function():
 def test_flake8_undefined_name():
     """测试 flake8 检测未定义的名称"""
     # 先检查 flake8 是否安装
-    try:
-        subprocess.run([sys.executable, "-m", "flake8", "--version"], 
-                      capture_output=True, check=True)
-    except subprocess.CalledProcessError:
+    import importlib.util
+    if importlib.util.find_spec("flake8") is None:
         pytest.skip("flake8 not installed")
     
     bad_code = """
@@ -122,10 +121,8 @@ def foo():
 def test_flake8_unused_import():
     """测试 flake8 检测未使用的导入"""
     # 先检查 flake8 是否安装
-    try:
-        subprocess.run([sys.executable, "-m", "flake8", "--version"], 
-                      capture_output=True, check=True)
-    except subprocess.CalledProcessError:
+    import importlib.util
+    if importlib.util.find_spec("flake8") is None:
         pytest.skip("flake8 not installed")
     
     bad_code = """

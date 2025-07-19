@@ -7,6 +7,8 @@ from pathlib import Path
 import shutil
 import ast
 import textwrap
+import warnings
+import importlib.util
 
 # 项目根目录
 ROOT = Path(__file__).parent
@@ -27,7 +29,18 @@ def static_check(src: str, path: Path):
             top.setdefault(node.name, []).append(node.lineno)
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             # 为导入语句生成唯一键
-            key = ast.unparse(node).replace(' ', '')
+            # Python 3.8 兼容性处理
+            try:
+                key = ast.unparse(node).replace(' ', '')
+            except AttributeError:
+                # Python 3.8 fallback - 简单的字符串表示
+                if isinstance(node, ast.Import):
+                    names = [alias.name for alias in node.names]
+                    key = f"import{','.join(names)}"
+                else:
+                    module = node.module or ''
+                    names = [alias.name for alias in node.names]
+                    key = f"from{module}import{','.join(names)}"
             top.setdefault(key, []).append(node.lineno)
     
     dupes = {k: v for k, v in top.items() if len(v) > 1}
@@ -36,7 +49,9 @@ def static_check(src: str, path: Path):
         pytest.fail(f'Duplicate top-level symbols in {path}:\n{msg}')
     
     # 3. 使用 flake8 进行静态分析
-    try:
+    if importlib.util.find_spec("flake8") is None:
+        warnings.warn("flake8 not installed - skipping F-series checks")
+    else:
         result = subprocess.run(
             [sys.executable, '-m', 'flake8', '--select=F', '--stdin-display-name', str(path), '-'],
             input=src.encode(),
@@ -44,10 +59,6 @@ def static_check(src: str, path: Path):
         )
         if result.returncode != 0:
             pytest.fail(f'[flake8] static errors in {path}:\n{result.stdout.decode()}')
-    except subprocess.CalledProcessError:
-        # 如果 flake8 未安装，跳过此检查但发出警告
-        import warnings
-        warnings.warn("flake8 not installed, skipping static analysis checks")
 
 def pytest_addoption(parser):
     """添加--merged命令行选项"""
@@ -99,17 +110,16 @@ def run_script(tmp_path, request):
                 if expected_merged.exists():
                     # 复制到临时目录
                     shutil.copy(expected_merged, merged_path)
-                    
-                    # 在执行前进行静态检查
-                    code = merged_path.read_text('utf-8')
-                    static_check(code, merged_path)
-                    
                     script_path = merged_path
                 else:
                     raise RuntimeError(f"Merged file not found at {expected_merged}")
                     
             except subprocess.CalledProcessError as e:
                 raise RuntimeError(f"Merge failed: {e.stderr}")
+            
+            # 在执行前进行静态检查（在所有合并路径后）
+            code = script_path.read_text('utf-8')
+            static_check(code, script_path)
         
         # 运行脚本
         cmd = [sys.executable, str(script_path)]
