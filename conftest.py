@@ -8,62 +8,52 @@ import shutil
 import ast
 import importlib.util
 
+# 导入 AST 审计器
+from pysymphony.auditor import ASTAuditor
+
 # 项目根目录
 ROOT = Path(__file__).parent
 
 def static_check(src: str, path: Path):
-    """对生成的合并代码进行静态检查 - 按照 issue #16 的要求"""
+    """对生成的合并代码进行静态检查 - 使用工业级 AST 审计器"""
     
-    # 1. 语法检查
+    # 使用 ASTAuditor 进行全面的多阶段审计
+    auditor = ASTAuditor()
+    
+    if not auditor.audit(src, str(path)):
+        # 审计失败，获取详细报告
+        report = auditor.get_report()
+        pytest.fail(f"静态分析错误 in {path}:\n{report}")
+    
+    # 补充使用 pyflakes 进行额外检查（性能更好）
     try:
-        tree = ast.parse(src)
-    except SyntaxError as e:
-        pytest.fail(f'Syntax error in {path}: {e}')
-    
-    # 2. 检查重复的顶级定义
-    top_level_defs = {}
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            if node.name in top_level_defs:
-                pytest.fail(
-                    f'Duplicate top-level definition in {path}: '
-                    f'"{node.name}" at line {node.lineno} '
-                    f'(previously defined at line {top_level_defs[node.name]})'
-                )
-            top_level_defs[node.name] = node.lineno
-        elif isinstance(node, (ast.Import, ast.ImportFrom)):
-            # 生成唯一 key，保持顺序无关
-            if isinstance(node, ast.Import):
-                names = sorted(alias.name for alias in node.names)
-                key = f"import {'/'.join(names)}"
-            else:
-                module = node.module or ""
-                names = sorted(alias.name for alias in node.names)
-                key = f"from {module} import {'/'.join(names)}"
-            if key in top_level_defs:
-                # ast.unparse 只在 Python 3.9+ 可用
-                try:
-                    import_txt = ast.unparse(node)
-                except AttributeError:
-                    import_txt = f"<{key}>"
-                pytest.fail(
-                    f'Duplicate top-level import in {path}: "{import_txt}" '
-                    f'@ line {node.lineno} (prev line {top_level_defs[key]})'
-                )
-            top_level_defs[key] = node.lineno
-    
-    # 3. 使用 flake8 进行 F 系列错误检查（强制要求）
-    try:
-        result = subprocess.run(
-            [sys.executable, '-m', 'flake8', '--select=F', '--stdin-display-name', str(path), '-'],
-            input=src.encode(),
-            capture_output=True,
-            check=True
-        )
-    except FileNotFoundError:
-        pytest.fail("flake8 not installed – please `pip install -r requirements-dev.txt`")
-    except subprocess.CalledProcessError as exc:
-        pytest.fail(f"[flake8] static errors in {path}:\n{exc.stdout.decode()}")
+        import pyflakes.api
+        import pyflakes.reporter as reporter
+        from io import StringIO
+        
+        # 创建输出流和 reporter
+        warnings = StringIO()
+        warning_reporter = reporter.Reporter(warnings, warnings)
+        
+        # 检查代码
+        errors_found = pyflakes.api.check(src, str(path), reporter=warning_reporter)
+        
+        if errors_found:
+            pytest.fail(f"[pyflakes] 额外的静态错误 in {path}:\n{warnings.getvalue()}")
+            
+    except ImportError:
+        # 如果 pyflakes 未安装，回退到 flake8
+        try:
+            result = subprocess.run(
+                [sys.executable, '-m', 'flake8', '--select=F', '--stdin-display-name', str(path), '-'],
+                input=src.encode(),
+                capture_output=True,
+                check=True
+            )
+        except FileNotFoundError:
+            pytest.fail("pyflakes 或 flake8 未安装 – 请运行 `pip install -r requirements-dev.txt`")
+        except subprocess.CalledProcessError as exc:
+            pytest.fail(f"[flake8] 静态错误 in {path}:\n{exc.stdout.decode()}")
 
 def pytest_addoption(parser):
     """添加--merged命令行选项"""
@@ -123,6 +113,10 @@ def run_script(tmp_path, request):
                 raise RuntimeError(f"Merge failed: {e.stderr}")
             
             # 在执行前进行静态检查（在所有合并路径后）
+            code = script_path.read_text('utf-8')
+            static_check(code, script_path)
+        else:
+            # 即使是原始脚本也进行静态检查（确保质量基线）
             code = script_path.read_text('utf-8')
             static_check(code, script_path)
         

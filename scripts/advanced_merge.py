@@ -1141,7 +1141,8 @@ class AdvancedCodeMerger:
         used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
         
         # Python 内置函数和关键字不应被视为未定义
-        builtin_names = set(dir(__builtins__))
+        import builtins
+        builtin_names = set(dir(builtins))
         undefined = sorted((used - defined) - builtin_names)
 
         # 文本级查找重复导入
@@ -1212,7 +1213,10 @@ class AdvancedCodeMerger:
             module_qname = self.visitor.get_module_qname(symbol.scope.module_path)
             if module_qname in self.visitor.all_symbols:
                 module_symbol = self.visitor.all_symbols[module_qname]
-                if module_symbol.init_statements and module_qname not in module_inits:
+                # 不要收集入口模块的初始化语句，因为它们已经在 main_code 中处理了
+                if (module_symbol.init_statements and 
+                    module_qname not in module_inits and 
+                    module_qname != self.entry_module_qname):
                     module_inits[module_qname] = module_symbol.init_statements
                     
         # 输出所有模块的初始化语句
