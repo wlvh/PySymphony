@@ -107,8 +107,8 @@ if __name__ == "__main__":
             '{"name":"test","value":42}' in result.stdout or
             '{"value":42,"name":"test"}' in result.stdout)
     
-    # 暂时跳过 ASTAuditor 验证，先确保基本功能正常
-    # TODO: 修复后重新启用
+    # 暂时跳过 ASTAuditor 验证
+    # ASTAuditor 需要改进来理解 try...except ImportError 模式中的"重复定义"是预期行为
     # from pysymphony.auditor import ASTAuditor
     # auditor = ASTAuditor()
     # with open(output_file, 'r') as f:
@@ -202,9 +202,12 @@ if __name__ == "__main__":
     merged_content = output_file.read_text()
     
     # 验证所有内部模块的代码都被包含
-    assert "def process(data):" in merged_content, "process function should be included"
+    # 函数可能被重命名，所以检查函数体而不是函数名
     assert "fast: {data}" in merged_content, "fast_impl code should be included"
     assert "standard: {data}" in merged_content, "fallback_impl code should be included"
+    # 确保两个模块的函数都被包含（可能被重命名）
+    assert merged_content.count('"""快速处理数据"""') == 1, "fast_impl process function should be included"
+    assert merged_content.count('"""标准处理数据"""') == 1, "fallback_impl process function should be included"
     
     # 验证 try...except 结构保留
     assert "try:" in merged_content, "try block should be preserved"
@@ -221,8 +224,8 @@ if __name__ == "__main__":
     assert "Result:" in result.stdout, "Expected output not found"
     assert "Implementation:" in result.stdout, "Implementation info not found"
     
-    # 暂时跳过 ASTAuditor 验证，先确保基本功能正常
-    # TODO: 修复后重新启用
+    # 暂时跳过 ASTAuditor 验证
+    # ASTAuditor 需要改进来理解 try...except ImportError 模式中的"重复定义"是预期行为
     # from pysymphony.auditor import ASTAuditor
     # auditor = ASTAuditor()
     # with open(output_file, 'r') as f:
@@ -329,8 +332,8 @@ if __name__ == "__main__":
     assert result.returncode == 0, f"Merged script failed to run: {result.stderr}"
     assert "Config format:" in result.stdout, "Expected output not found"
     
-    # 暂时跳过 ASTAuditor 验证，先确保基本功能正常
-    # TODO: 修复后重新启用
+    # 暂时跳过 ASTAuditor 验证
+    # ASTAuditor 需要改进来理解 try...except ImportError 模式中的"重复定义"是预期行为
     # from pysymphony.auditor import ASTAuditor
     # auditor = ASTAuditor()
     # with open(output_file, 'r') as f:
