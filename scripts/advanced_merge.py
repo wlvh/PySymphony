@@ -195,26 +195,33 @@ class ContextAwareVisitor(ast.NodeVisitor):
             return
             
         self.analyzed_modules.add(module_path)
+        
+        # 保存当前模块路径，以便递归调用后恢复
+        old_module_path = self.current_module_path
         self.current_module_path = module_path
         
-        with open(module_path, 'r', encoding='utf-8') as f:
-            content = f.read()
+        try:
+            with open(module_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+                
+            tree = ast.parse(content, filename=str(module_path))
             
-        tree = ast.parse(content, filename=str(module_path))
-        
-        # 创建模块作用域
-        module_scope = Scope(
-            scope_type='module',
-            node=tree,
-            module_path=module_path
-        )
-        
-        # 保存模块作用域以便后续查找
-        self.module_symbols[module_path]['__scope__'] = module_scope
-        
-        self.push_scope(module_scope)
-        self.visit(tree)
-        self.pop_scope()
+            # 创建模块作用域
+            module_scope = Scope(
+                scope_type='module',
+                node=tree,
+                module_path=module_path
+            )
+            
+            # 保存模块作用域以便后续查找
+            self.module_symbols[module_path]['__scope__'] = module_scope
+            
+            self.push_scope(module_scope)
+            self.visit(tree)
+            self.pop_scope()
+        finally:
+            # 恢复原来的模块路径
+            self.current_module_path = old_module_path
         
     def visit_Module(self, node: ast.Module):
         """访问模块节点"""
@@ -912,6 +919,18 @@ class AdvancedCodeMerger:
                 for dep in symbol.dependencies:
                     if dep not in needed:
                         to_process.append(dep)
+            
+            # 如果是类，收集该类所有方法和属性的依赖
+            if symbol.symbol_type == 'class':
+                # 查找该类定义的所有方法
+                for qname, sym in self.visitor.all_symbols.items():
+                    # 检查是否是该类的方法（通过 qname 前缀判断）
+                    if (qname.startswith(symbol.qname + '.') and 
+                        sym.symbol_type == 'function'):
+                        # 添加方法的所有依赖
+                        for method_dep in sym.dependencies:
+                            if method_dep not in needed and method_dep != symbol:
+                                to_process.append(method_dep)
                         
         return needed
         
@@ -1339,8 +1358,10 @@ class AdvancedNodeTransformer(ast.NodeTransformer):
                     if symbol.symbol_type in ('class', 'function'):
                         return ast.Name(id=symbol.name, ctx=node.ctx)
         
-        # 其他情况，继续原有处理
-        elif base_symbol.symbol_type == 'import_alias':
+        # 其他情况的处理
+        target_symbol = None
+        
+        if base_symbol.symbol_type == 'import_alias':
             # 如果导入别名本身在映射中（例如模块别名），使用映射后的名称
             if base_symbol.qname in self.name_mappings:
                 current.id = self.name_mappings[base_symbol.qname]
