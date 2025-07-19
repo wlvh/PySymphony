@@ -118,6 +118,19 @@ class ContextAwareVisitor(ast.NodeVisitor):
             
         return None
         
+    def _is_dunder_main_block(self, node: ast.AST) -> bool:
+        """检查是否是 if __name__ == '__main__' 块"""
+        if isinstance(node, ast.If):
+            # 检查条件是否是 __name__ == '__main__'
+            test = node.test
+            if isinstance(test, ast.Compare):
+                if (isinstance(test.left, ast.Name) and test.left.id == '__name__' and
+                    len(test.ops) == 1 and isinstance(test.ops[0], ast.Eq) and
+                    len(test.comparators) == 1 and isinstance(test.comparators[0], ast.Constant) and
+                    test.comparators[0].value == '__main__'):
+                    return True
+        return False
+    
     def get_module_qname(self, module_path: Path) -> str:
         """获取模块的限定名"""
         try:
@@ -249,7 +262,9 @@ class ContextAwareVisitor(ast.NodeVisitor):
                 self.visit(stmt)
             else:
                 # 其他顶层语句（副作用初始化）
-                init_statements.append(stmt)
+                # 不收集 if __name__ == '__main__' 块，由 merge_script 处理
+                if not self._is_dunder_main_block(stmt):
+                    init_statements.append(stmt)
                 
         # 存储初始化语句
         if init_statements:
@@ -548,6 +563,10 @@ class ContextAwareVisitor(ast.NodeVisitor):
                 # 忽略特殊的内部变量
                 if target.id.startswith('_') and target.id != '__all__':
                     continue
+                
+                # 跳过函数调用的赋值（通常是实例化或函数调用结果）
+                if isinstance(node.value, ast.Call):
+                    continue
                     
                 qname = f"{self.get_module_qname(self.current_module_path)}.{target.id}"
                 
@@ -825,10 +844,14 @@ class AdvancedCodeMerger:
         self.needed_symbols: Set[Symbol] = set()
         self.name_mappings: Dict[str, str] = {}  # qname -> new_name
         self.enable_verify = False  # 是否启用验证模式
+        self.written_names: Set[str] = set()  # 解决 #1: 已写入的名称集合
+        self.import_registry: Set[Tuple[str, str]] = set()  # 解决 #2: (module, alias)
+        self.entry_module_qname: Optional[str] = None  # 解决 #3: 入口脚本的模块名
         
     def analyze_entry_script(self, script_path: Path) -> Tuple[Set[Symbol], List[ast.AST]]:
         """分析入口脚本，返回初始符号集和主代码"""
         self.visitor.analyze_module(script_path)
+        self.entry_module_qname = self.visitor.get_module_qname(script_path)  # 记录入口模块名
         
         initial_symbols = set()
         main_code = []
@@ -870,8 +893,8 @@ class AdvancedCodeMerger:
                             alias_name = alias.asname or alias.name.split('.')[-1]
                             if alias_name in module_scope.symbols:
                                 initial_symbols.add(module_scope.symbols[alias_name])
-            else:
-                # 其他语句 - 分析其中使用的符号
+            elif not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                # 其他语句（但不包括函数和类定义） - 分析其中使用的符号
                 main_code.append(node)
                 
                 # 收集主代码中引用的符号
@@ -885,6 +908,9 @@ class AdvancedCodeMerger:
                 else:
                     deps = self.visitor.analyze_dependencies(node)
                 initial_symbols.update(deps)
+            else:
+                # 函数和类定义 - 不加入主代码，但需要分析是否被引用
+                pass
         
         # 添加保守规则：收集导入别名指向的实际符号
         # 即使这些符号没有在主代码中直接使用
@@ -897,8 +923,20 @@ class AdvancedCodeMerger:
                         
         return initial_symbols, main_code
         
+    def _index_class_children(self):
+        """解决 #4: 建立类-方法索引以避免 O(N²) 复杂度"""
+        self.class_children = defaultdict(list)
+        for sym in self.visitor.all_symbols.values():
+            if sym.symbol_type == 'function' and '.' in sym.qname:
+                # 找到父类的 qname
+                class_qname = sym.qname.rsplit('.', 1)[0]
+                self.class_children[class_qname].append(sym)
+    
     def collect_all_dependencies(self, initial_symbols: Set[Symbol]) -> Set[Symbol]:
         """递归收集所有依赖"""
+        # 首先建立类-方法索引
+        self._index_class_children()
+        
         needed = set()
         to_process = deque(initial_symbols)
         
@@ -920,17 +958,14 @@ class AdvancedCodeMerger:
                     if dep not in needed:
                         to_process.append(dep)
             
-            # 如果是类，收集该类所有方法和属性的依赖
+            # 如果是类，使用 O(1) 索引收集方法依赖
             if symbol.symbol_type == 'class':
-                # 查找该类定义的所有方法
-                for qname, sym in self.visitor.all_symbols.items():
-                    # 检查是否是该类的方法（通过 qname 前缀判断）
-                    if (qname.startswith(symbol.qname + '.') and 
-                        sym.symbol_type == 'function'):
-                        # 添加方法的所有依赖
-                        for method_dep in sym.dependencies:
-                            if method_dep not in needed and method_dep != symbol:
-                                to_process.append(method_dep)
+                # 从索引中获取该类的所有方法
+                for method_sym in self.class_children.get(symbol.qname, []):
+                    # 添加方法的所有依赖
+                    for method_dep in method_sym.dependencies:
+                        if method_dep not in needed and method_dep != symbol:
+                            to_process.append(method_dep)
                         
         return needed
         
@@ -972,6 +1007,23 @@ class AdvancedCodeMerger:
             
         return sorted_symbols
         
+    def _ast_equal(self, node1: ast.AST, node2: ast.AST) -> bool:
+        """检查两个 AST 节点是否相等"""
+        return ast.dump(node1) == ast.dump(node2)
+    
+    def _is_dunder_main(self, node: ast.AST) -> bool:
+        """检查是否是 if __name__ == '__main__' 块"""
+        if isinstance(node, ast.If):
+            # 检查条件是否是 __name__ == '__main__'
+            test = node.test
+            if isinstance(test, ast.Compare):
+                if (isinstance(test.left, ast.Name) and test.left.id == '__name__' and
+                    len(test.ops) == 1 and isinstance(test.ops[0], ast.Eq) and
+                    len(test.comparators) == 1 and isinstance(test.comparators[0], ast.Constant) and
+                    test.comparators[0].value == '__main__'):
+                    return True
+        return False
+    
     def generate_name_mappings(self, symbols: Set[Symbol]):
         """生成名称映射"""
         # 统计名称冲突
@@ -996,6 +1048,86 @@ class AdvancedCodeMerger:
                 # 无冲突，保持原名
                 self.name_mappings[symbol.qname] = symbol.name
                 
+    def _write_symbol(self, symbol: Symbol, transformer: 'AdvancedNodeTransformer', result_lines: List[str]):
+        """解决 #1: 写入符号时进行冲突检测"""
+        # 获取目标名称
+        target_name = self.name_mappings.get(symbol.qname, symbol.name)
+        
+        # 检查是否已经存在
+        if target_name in self.written_names:
+            # 获取节点并检查是否完全相同
+            transformed = transformer.transform_symbol(symbol)
+            if transformed is None:
+                return
+                
+            # 检查是否是完全重复的定义
+            # 简化处理：如果名称已存在，则重命名
+            module_qname = self.visitor.get_module_qname(symbol.scope.module_path)
+            module_alias = module_qname.replace('.', '_')
+            new_name = f"{target_name}__from_{module_alias}"
+            self.name_mappings[symbol.qname] = new_name
+            target_name = new_name
+            
+            # 重新转换符号
+            transformed = transformer.transform_symbol(symbol)
+        else:
+            # 转换符号
+            transformed = transformer.transform_symbol(symbol)
+            
+        # 记录已写入的名称
+        self.written_names.add(target_name)
+        
+        # 写入结果
+        if transformed is not None:
+            if symbol.scope.module_path:
+                rel_path = symbol.scope.module_path.relative_to(self.project_root)
+                result_lines.append(f"# From {rel_path}")
+            result_lines.append(ast.unparse(transformed))
+            result_lines.append("")
+    
+    def _process_imports(self, imports: Set[str]) -> List[str]:
+        """解决 #2: 处理导入去重和 alias 冲突"""
+        result = []
+        alias_map = {}  # alias -> module 的映射
+        
+        for imp in sorted(imports):
+            # 解析导入语句
+            if imp.startswith('from '):
+                # from X import Y as Z 或 from X import Y
+                parts = imp.split()
+                if 'as' in parts:
+                    # from X import Y as Z
+                    as_idx = parts.index('as')
+                    module = parts[1]
+                    name = parts[3]
+                    alias = parts[as_idx + 1]
+                    key = (module, name, alias)
+                else:
+                    # from X import Y
+                    module = parts[1]
+                    name = parts[3]
+                    key = (module, name, name)
+            else:
+                # import X as Y 或 import X
+                parts = imp.split()
+                if 'as' in parts:
+                    # import X as Y
+                    as_idx = parts.index('as')
+                    module = parts[1]
+                    alias = parts[as_idx + 1]
+                    key = (module, alias)
+                else:
+                    # import X
+                    module = parts[1]
+                    key = (module, module.split('.')[0])
+            
+            # 检查是否已存在
+            if key not in self.import_registry:
+                self.import_registry.add(key)
+                result.append(imp)
+        
+        return result
+    
     def merge_script(self, script_path: Path) -> str:
         """合并脚本"""
         script_path = script_path.resolve()
@@ -1028,25 +1160,18 @@ class AdvancedCodeMerger:
             result_lines.extend(sorted(self.visitor.future_imports))
             result_lines.append("")
             
-        # 外部导入
+        # 外部导入（通过去重处理）
         if self.visitor.external_imports:
-            result_lines.extend(sorted(self.visitor.external_imports))
+            processed_imports = self._process_imports(self.visitor.external_imports)
+            result_lines.extend(processed_imports)
             result_lines.append("")
             
         # 合并的符号定义
         module_inits = {}  # 收集每个模块的初始化语句
         
         for symbol in sorted_symbols:
-            # 添加源文件注释
-            if symbol.scope.module_path:
-                rel_path = symbol.scope.module_path.relative_to(self.project_root)
-                result_lines.append(f"# From {rel_path}")
-            
-            # 转换并输出符号定义
-            transformed = transformer.transform_symbol(symbol)
-            if transformed is not None:
-                result_lines.append(ast.unparse(transformed))
-                result_lines.append("")
+            # 使用新的写入方法（包含冲突检测）
+            self._write_symbol(symbol, transformer, result_lines)
             
             # 收集模块初始化语句
             module_qname = self.visitor.get_module_qname(symbol.scope.module_path)
@@ -1059,6 +1184,9 @@ class AdvancedCodeMerger:
         if module_inits:
             result_lines.append("# Module initialization statements")
             for module_qname, init_stmts in module_inits.items():
+                # 解决 #3: 过滤非入口模块的 __main__ 块
+                should_skip_main = (module_qname != self.entry_module_qname)
+                
                 result_lines.append(f"# From module: {module_qname}")
                 
                 # 设置正确的模块作用域
@@ -1074,6 +1202,11 @@ class AdvancedCodeMerger:
                     # 跳过模块文档字符串
                     if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, str):
                         continue
+                    
+                    # 解决 #3: 跳过非入口模块的 __main__ 块
+                    if should_skip_main and self._is_dunder_main(stmt):
+                        continue
+                        
                     transformed_stmt = transformer.visit(copy.deepcopy(stmt))
                     result_lines.append(ast.unparse(transformed_stmt))
             result_lines.append("")
