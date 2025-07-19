@@ -41,8 +41,13 @@ def static_check(src: str, path: Path):
                 names = sorted(alias.name for alias in node.names)
                 key = f"from {module} import {'/'.join(names)}"
             if key in top_level_defs:
+                # ast.unparse 只在 Python 3.9+ 可用
+                try:
+                    import_txt = ast.unparse(node)
+                except AttributeError:
+                    import_txt = f"<{key}>"
                 pytest.fail(
-                    f'Duplicate top-level import in {path}: "{ast.unparse(node)}" '
+                    f'Duplicate top-level import in {path}: "{import_txt}" '
                     f'@ line {node.lineno} (prev line {top_level_defs[key]})'
                 )
             top_level_defs[key] = node.lineno
