@@ -1141,7 +1141,8 @@ class AdvancedCodeMerger:
         used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
         
         # Python 内置函数和关键字不应被视为未定义
-        builtin_names = set(dir(__builtins__))
+        import builtins
+        builtin_names = set(dir(builtins))
         undefined = sorted((used - defined) - builtin_names)
 
         # 文本级查找重复导入
