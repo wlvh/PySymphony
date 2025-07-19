@@ -43,6 +43,8 @@ class SymbolTableBuilder(ast.NodeVisitor):
         self.current_scope: ScopeInfo = ScopeInfo(name='<module>', type='module')
         self.module_scope: ScopeInfo = self.current_scope
         self.duplicate_definitions: List[Tuple[str, List[int]]] = []
+        self.in_try_import_error: bool = False  # 标记是否在 try...except ImportError 块中
+        self.try_except_symbols: Set[str] = set()  # 记录在 try...except ImportError 块中定义的符号
         
     def enter_scope(self, name: str, scope_type: str):
         """进入新的作用域"""
@@ -57,13 +59,21 @@ class SymbolTableBuilder(ast.NodeVisitor):
             
     def add_symbol(self, name: str, node: ast.AST, symbol_type: str):
         """添加符号到当前作用域"""
+        # 如果在 try...except ImportError 块中，记录符号
+        if self.in_try_import_error and self.current_scope.type == 'module':
+            self.try_except_symbols.add(name)
+        
         # 检查重复定义
         if name in self.current_scope.symbols:
             existing = self.current_scope.symbols[name]
-            self.duplicate_definitions.append((
-                name,
-                [existing.lineno, node.lineno]
-            ))
+            # 如果两个定义都在 try...except ImportError 块中，这是预期行为，不报错
+            if name in self.try_except_symbols:
+                pass  # 跳过错误报告
+            else:
+                self.duplicate_definitions.append((
+                    name,
+                    [existing.lineno, node.lineno]
+                ))
         
         self.current_scope.symbols[name] = SymbolInfo(
             name=name,
@@ -99,6 +109,34 @@ class SymbolTableBuilder(ast.NodeVisitor):
         self.enter_scope(node.name, 'class')
         self.generic_visit(node)
         self.exit_scope()
+        
+    def _is_try_import_error(self, node: ast.Try) -> bool:
+        """检查是否是 try...except ImportError 模式"""
+        for handler in node.handlers:
+            if handler.type:
+                # 检查是否捕获 ImportError
+                if isinstance(handler.type, ast.Name) and handler.type.id == 'ImportError':
+                    return True
+                # 也可能是 except (ImportError, ModuleNotFoundError)
+                elif isinstance(handler.type, ast.Tuple):
+                    for exc in handler.type.elts:
+                        if isinstance(exc, ast.Name) and exc.id in ('ImportError', 'ModuleNotFoundError'):
+                            return True
+        return False
+        
+    def visit_Try(self, node: ast.Try):
+        """访问 try 语句"""
+        # 保存进入此节点前的状态
+        original_state = self.in_try_import_error
+        
+        if self._is_try_import_error(node):
+            self.in_try_import_error = True
+        
+        # 递归访问所有子节点
+        self.generic_visit(node)
+        
+        # 离开此节点时，恢复原始状态
+        self.in_try_import_error = original_state
         
     def visit_Import(self, node: ast.Import):
         """访问导入语句"""
@@ -233,6 +271,20 @@ class ASTAuditor:
         self.errors: List[str] = []
         self.warnings: List[str] = []
         
+    def _is_try_import_error(self, node: ast.Try) -> bool:
+        """检查是否是 try...except ImportError 模式"""
+        for handler in node.handlers:
+            if handler.type:
+                # 检查是否捕获 ImportError
+                if isinstance(handler.type, ast.Name) and handler.type.id == 'ImportError':
+                    return True
+                # 也可能是 except (ImportError, ModuleNotFoundError)
+                elif isinstance(handler.type, ast.Tuple):
+                    for exc in handler.type.elts:
+                        if isinstance(exc, ast.Name) and exc.id in ('ImportError', 'ModuleNotFoundError'):
+                            return True
+        return False
+        
     def audit(self, source_code: str, filename: str = '<unknown>') -> bool:
         """
         对源代码进行完整的多阶段审计
@@ -294,6 +346,35 @@ class ASTAuditor:
     def _check_top_level_conflicts(self, tree: ast.AST):
         """后处理：检查顶层符号冲突，包括导入"""
         top_level_symbols: Dict[str, List[int]] = {}
+        # 记录在 try...except ImportError 块中的符号
+        try_except_symbols: Set[str] = set()
+        
+        # 首先识别所有在 try...except ImportError 块中定义的符号
+        for node in tree.body:
+            if isinstance(node, ast.Try) and self._is_try_import_error(node):
+                # 收集 try 块中的导入
+                for stmt in node.body:
+                    if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+                        if isinstance(stmt, ast.Import):
+                            for alias in stmt.names:
+                                imported_name = alias.asname if alias.asname else alias.name
+                                try_except_symbols.add(imported_name)
+                        elif isinstance(stmt, ast.ImportFrom):
+                            for alias in stmt.names:
+                                imported_name = alias.asname if alias.asname else alias.name
+                                try_except_symbols.add(imported_name)
+                # 收集 except 块中的导入
+                for handler in node.handlers:
+                    for stmt in handler.body:
+                        if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+                            if isinstance(stmt, ast.Import):
+                                for alias in stmt.names:
+                                    imported_name = alias.asname if alias.asname else alias.name
+                                    try_except_symbols.add(imported_name)
+                            elif isinstance(stmt, ast.ImportFrom):
+                                for alias in stmt.names:
+                                    imported_name = alias.asname if alias.asname else alias.name
+                                    try_except_symbols.add(imported_name)
         
         for node in tree.body:
             symbol_key = None
@@ -306,6 +387,9 @@ class ASTAuditor:
             elif isinstance(node, ast.Import):
                 for alias in node.names:
                     imported_name = alias.asname if alias.asname else alias.name
+                    # 如果符号在 try...except ImportError 块中，跳过冲突检查
+                    if imported_name in try_except_symbols:
+                        continue
                     if imported_name in top_level_symbols:
                         self.errors.append(
                             f"顶层导入 '{imported_name}' 重复定义于第 {[top_level_symbols[imported_name][0], node.lineno]} 行"
@@ -317,6 +401,9 @@ class ASTAuditor:
             elif isinstance(node, ast.ImportFrom):
                 for alias in node.names:
                     imported_name = alias.asname if alias.asname else alias.name
+                    # 如果符号在 try...except ImportError 块中，跳过冲突检查
+                    if imported_name in try_except_symbols:
+                        continue
                     if imported_name in top_level_symbols:
                         self.errors.append(
                             f"顶层导入 '{imported_name}' 重复定义于第 {[top_level_symbols[imported_name][0], node.lineno]} 行"
