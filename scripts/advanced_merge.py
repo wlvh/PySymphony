@@ -1023,12 +1023,18 @@ class AdvancedCodeMerger:
         # 检查是否有符号使用了运行时导入
         has_runtime_import = False
         for symbol in needed_symbols:
+            # 检查符号的直接依赖
             for dep in symbol.dependencies:
                 if dep.is_runtime_import:
                     has_runtime_import = True
-                    break
-            if has_runtime_import:
-                break
+                    runtime_deps.add(dep)  # 直接添加运行时导入符号
+            
+            # 检查符号的定义节点中是否引用了运行时导入
+            if symbol.def_node and hasattr(symbol, 'symbol_type'):
+                # 对于函数，检查其内部是否使用了运行时导入的符号
+                if symbol.symbol_type in ('function', 'class'):
+                    # 这些符号的定义会在后续被分析
+                    has_runtime_import = True
         
         if not has_runtime_import:
             return runtime_deps
@@ -1040,7 +1046,19 @@ class AdvancedCodeMerger:
                     if isinstance(stmt, ast.Try) and self.visitor._is_try_import_error(stmt):
                         # 收集 try 块中的导入
                         for try_stmt in stmt.body:
-                            if isinstance(try_stmt, ast.ImportFrom):
+                            if isinstance(try_stmt, ast.Import):
+                                # 处理 import orjson as json 形式
+                                for alias in try_stmt.names:
+                                    # 计算实际的别名
+                                    actual_alias = alias.asname or alias.name.split('.')[0]
+                                    # 查找对应的符号
+                                    for sym in self.visitor.all_symbols.values():
+                                        if (sym.symbol_type == 'import_alias' and 
+                                            sym.is_runtime_import and
+                                            sym.scope.module_path == module_symbol.scope.module_path and
+                                            sym.name == actual_alias):  # 检查符号名称是否匹配
+                                            runtime_deps.add(sym)
+                            elif isinstance(try_stmt, ast.ImportFrom):
                                 # 获取导入的符号
                                 module_name = try_stmt.module or ''
                                 level = try_stmt.level or 0
@@ -1062,7 +1080,19 @@ class AdvancedCodeMerger:
                         # 同样处理 except 块
                         for handler in stmt.handlers:
                             for except_stmt in handler.body:
-                                if isinstance(except_stmt, ast.ImportFrom):
+                                if isinstance(except_stmt, ast.Import):
+                                    # 处理 import json 形式
+                                    for alias in except_stmt.names:
+                                        # 计算实际的别名
+                                        actual_alias = alias.asname or alias.name.split('.')[0]
+                                        # 查找对应的符号
+                                        for sym in self.visitor.all_symbols.values():
+                                            if (sym.symbol_type == 'import_alias' and 
+                                                sym.is_runtime_import and
+                                                sym.scope.module_path == module_symbol.scope.module_path and
+                                                sym.name == actual_alias):  # 检查符号名称是否匹配
+                                                runtime_deps.add(sym)
+                                elif isinstance(except_stmt, ast.ImportFrom):
                                     module_name = except_stmt.module or ''
                                     level = except_stmt.level or 0
                                     
@@ -1198,18 +1228,13 @@ class AdvancedCodeMerger:
     
     def generate_name_mappings(self, symbols: Set[Symbol]):
         """生成名称映射"""
-        # 统计名称冲突
+        # 统计名称冲突（包括导入别名）
         name_counts = defaultdict(int)
         for symbol in symbols:
-            if symbol.symbol_type != 'import_alias':
-                name_counts[symbol.name] += 1
+            name_counts[symbol.name] += 1
                 
         # 生成映射
         for symbol in symbols:
-            if symbol.symbol_type == 'import_alias':
-                # 导入别名保持不变
-                continue
-                
             if name_counts[symbol.name] > 1:
                 # 有冲突，需要重命名
                 module_key = self.visitor.get_module_qname(symbol.scope.module_path)
@@ -1695,7 +1720,16 @@ class AdvancedNodeTransformer(ast.NodeTransformer):
     def visit_Name(self, node: ast.Name):
         """转换名称引用"""
         if isinstance(node.ctx, ast.Load):
-            # 查找符号的限定名
+            symbol = self.resolve_name_to_symbol(node.id)
+            
+            # 关键：如果是一个运行时符号，我们只对别名本身进行重命名，然后立即返回，
+            # 阻止任何进一步的解析和内联。
+            if symbol and symbol.is_runtime_import:
+                if symbol.qname in self.name_mappings:
+                    node.id = self.name_mappings[symbol.qname]
+                return node  # 立即返回，保持别名引用
+            
+            # 对普通符号的现有处理逻辑
             qname = self.find_symbol_qname(node.id)
             if qname and qname in self.name_mappings:
                 node.id = self.name_mappings[qname]
