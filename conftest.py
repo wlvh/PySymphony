@@ -31,16 +31,34 @@ def static_check(src: str, path: Path):
                     f'(previously defined at line {top_level_defs[node.name]})'
                 )
             top_level_defs[node.name] = node.lineno
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            # 生成唯一 key，保持顺序无关
+            if isinstance(node, ast.Import):
+                names = sorted(alias.name for alias in node.names)
+                key = f"import {'/'.join(names)}"
+            else:
+                module = node.module or ""
+                names = sorted(alias.name for alias in node.names)
+                key = f"from {module} import {'/'.join(names)}"
+            if key in top_level_defs:
+                pytest.fail(
+                    f'Duplicate top-level import in {path}: "{ast.unparse(node)}" '
+                    f'@ line {node.lineno} (prev line {top_level_defs[key]})'
+                )
+            top_level_defs[key] = node.lineno
     
     # 3. 使用 flake8 进行 F 系列错误检查（强制要求）
-    result = subprocess.run(
-        [sys.executable, '-m', 'flake8', '--select=F', '--stdin-display-name', str(path), '-'],
-        input=src.encode(),
-        capture_output=True
-    )
-    
-    if result.returncode != 0:
-        pytest.fail(f'[flake8] static errors in {path}:\n{result.stdout.decode()}')
+    try:
+        result = subprocess.run(
+            [sys.executable, '-m', 'flake8', '--select=F', '--stdin-display-name', str(path), '-'],
+            input=src.encode(),
+            capture_output=True,
+            check=True
+        )
+    except FileNotFoundError:
+        pytest.fail("flake8 not installed – please `pip install -r requirements-dev.txt`")
+    except subprocess.CalledProcessError as exc:
+        pytest.fail(f"[flake8] static errors in {path}:\n{exc.stdout.decode()}")
 
 def pytest_addoption(parser):
     """添加--merged命令行选项"""

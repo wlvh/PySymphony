@@ -4,6 +4,11 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import importlib.util
+
+# 检查 flake8 是否已安装
+if importlib.util.find_spec("flake8") is None:
+    pytest.skip("flake8 not installed", allow_module_level=True)
 
 # 添加项目根目录到 Python 路径
 ROOT = Path(__file__).parent.parent
@@ -54,6 +59,17 @@ class MyClass:
             static_check(code_with_dup_class, Path("test.py"))
         assert "Duplicate top-level definition" in str(exc_info.value)
         assert "MyClass" in str(exc_info.value)
+    
+    def test_duplicate_imports(self):
+        """测试2：重复的导入语句检测"""
+        code = '''
+import os
+import os
+from pathlib import Path
+from pathlib import Path
+'''
+        with pytest.raises(Exception, match="Duplicate top-level import"):
+            static_check(code, Path("dup_import.py"))
     
     def test_flake8_undefined_name(self):
         """测试3：flake8 F821 未定义的名称"""
