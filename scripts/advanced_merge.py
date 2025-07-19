@@ -82,6 +82,7 @@ class ContextAwareVisitor(ast.NodeVisitor):
         self.external_imports: Set[str] = set()
         self.future_imports: Set[str] = set()
         self.analyzed_modules: Set[Path] = set()
+        self.in_try_import_error: bool = False  # 标记是否在 try...except ImportError 块中
         
     def push_scope(self, scope: Scope):
         """进入新作用域"""
@@ -96,6 +97,20 @@ class ContextAwareVisitor(ast.NodeVisitor):
     def current_scope(self) -> Optional[Scope]:
         """获取当前作用域"""
         return self.scope_stack[-1] if self.scope_stack else None
+        
+    def _is_try_import_error(self, node: ast.Try) -> bool:
+        """检查是否是 try...except ImportError 模式"""
+        for handler in node.handlers:
+            if handler.type:
+                # 检查是否捕获 ImportError
+                if isinstance(handler.type, ast.Name) and handler.type.id == 'ImportError':
+                    return True
+                # 也可能是 except (ImportError, ModuleNotFoundError)
+                elif isinstance(handler.type, ast.Tuple):
+                    for exc in handler.type.elts:
+                        if isinstance(exc, ast.Name) and exc.id in ('ImportError', 'ModuleNotFoundError'):
+                            return True
+        return False
         
     def resolve_name(self, name: str, from_scope: Optional[Scope] = None) -> Optional[Symbol]:
         """从作用域栈解析名称（LEGB规则）"""
@@ -269,6 +284,12 @@ class ContextAwareVisitor(ast.NodeVisitor):
                                  ast.ClassDef, ast.Assign, ast.AnnAssign)):
                 # 定义语句
                 self.visit(stmt)
+            elif isinstance(stmt, ast.Try) and self._is_try_import_error(stmt):
+                # 特殊处理 try...except ImportError 块
+                # 保留完整的块作为初始化语句
+                init_statements.append(stmt)
+                # 访问以分析内部的导入
+                self.visit(stmt)
             else:
                 # 其他顶层语句（副作用初始化）
                 # 总是收集所有语句，包括 if __name__ == '__main__' 块
@@ -312,10 +333,12 @@ class ContextAwareVisitor(ast.NodeVisitor):
                     self.all_symbols[symbol.qname] = symbol
             else:
                 # 外部导入
-                if alias.asname:
-                    self.external_imports.add(f"import {module_name} as {alias_name}")
-                else:
-                    self.external_imports.add(f"import {module_name}")
+                # 如果在 try...except ImportError 块中，不要添加到外部导入列表
+                if not self.in_try_import_error:
+                    if alias.asname:
+                        self.external_imports.add(f"import {module_name} as {alias_name}")
+                    else:
+                        self.external_imports.add(f"import {module_name}")
                     
     def visit_ImportFrom(self, node: ast.ImportFrom):
         """处理 from ... import ... 语句"""
@@ -343,7 +366,7 @@ class ContextAwareVisitor(ast.NodeVisitor):
             module_path = self.resolve_module_path(module_name)
             
         if module_path and self.is_internal_module(module_name, self.current_module_path, level):
-            # 内部模块
+            # 内部模块 - 即使在 try...except ImportError 块中也要分析
             self.analyze_module(module_path)
             
             for alias in node.names:
@@ -369,15 +392,17 @@ class ContextAwareVisitor(ast.NodeVisitor):
                 self.module_symbols[self.current_module_path][alias_name] = symbol
         else:
             # 外部导入
-            for alias in node.names:
-                if alias.asname:
-                    self.external_imports.add(
-                        f"from {module_name} import {alias.name} as {alias.asname}"
-                    )
-                else:
-                    self.external_imports.add(
-                        f"from {module_name} import {alias.name}"
-                    )
+            # 如果在 try...except ImportError 块中，不要添加到外部导入列表
+            if not self.in_try_import_error:
+                for alias in node.names:
+                    if alias.asname:
+                        self.external_imports.add(
+                            f"from {module_name} import {alias.name} as {alias.asname}"
+                        )
+                    else:
+                        self.external_imports.add(
+                            f"from {module_name} import {alias.name}"
+                        )
                     
     def visit_FunctionDef(self, node: Union[ast.FunctionDef, ast.AsyncFunctionDef]):
         """处理函数定义"""
@@ -1629,6 +1654,15 @@ class AdvancedNodeTransformer(ast.NodeTransformer):
     def visit_Constant(self, node: ast.Constant):
         """处理字符串常量中的类型注解"""
         # 暂时不处理字符串类型注解
+        return node
+        
+    def visit_Try(self, node: ast.Try):
+        """处理 try...except 语句
+        
+        对于 AdvancedNodeTransformer，我们只需要正常转换内部的节点
+        """
+        # 使用默认的转换逻辑
+        self.generic_visit(node)
         return node
 
 
