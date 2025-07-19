@@ -271,9 +271,10 @@ class ContextAwareVisitor(ast.NodeVisitor):
                 self.visit(stmt)
             else:
                 # 其他顶层语句（副作用初始化）
-                # 不收集 if __name__ == '__main__' 块，由 merge_script 处理
-                if not self._is_dunder_main_block(stmt):
-                    init_statements.append(stmt)
+                # 总是收集所有语句，包括 if __name__ == '__main__' 块
+                init_statements.append(stmt)
+                # 但仍然需要访问语句以分析依赖
+                self.visit(stmt)
                 
         # 存储初始化语句
         if init_statements:
@@ -744,6 +745,9 @@ class ContextAwareVisitor(ast.NodeVisitor):
                         # 特别是要包含函数和类符号
                         if symbol.symbol_type in ('function', 'class', 'variable', 'import_alias'):
                             self.deps.add(symbol)
+                            # 如果是导入别名，也添加其目标符号
+                            if symbol.symbol_type == 'import_alias' and symbol.dependencies:
+                                self.deps.update(symbol.dependencies)
                         
             def visit_Attribute(self, node):
                 # 改进：递归向右解析属性链
@@ -1162,10 +1166,18 @@ class AdvancedCodeMerger:
         self.needed_symbols = self.collect_all_dependencies(initial_symbols)
         
         # 3. 过滤掉导入别名、嵌套定义和模块符号
-        output_symbols = {
-            s for s in self.needed_symbols 
-            if s.symbol_type not in ('import_alias', 'module', 'parameter') and not s.is_nested
-        }
+        # 但是，如果嵌套定义被其他符号依赖，应该保留它
+        output_symbols = set()
+        for s in self.needed_symbols:
+            if s.symbol_type in ('import_alias', 'module', 'parameter'):
+                continue
+            if s.is_nested:
+                # 检查是否有其他符号依赖这个嵌套符号
+                # 暂时保留所有嵌套类，因为它们可能被属性访问使用
+                if s.symbol_type == 'class':
+                    output_symbols.add(s)
+            else:
+                output_symbols.add(s)
         
         # 4. 拓扑排序
         sorted_symbols = self.topological_sort(output_symbols)
@@ -1568,24 +1580,13 @@ class AdvancedNodeTransformer(ast.NodeTransformer):
         if not target_symbol:
             return self.generic_visit(node)
             
-        # 尝试解析完整的属性链
-        # 对于 a.b.c，我们需要先解析 a.b，再解析 (a.b).c
-        current_symbol = target_symbol
+        # 处理属性链
+        # 如果基础符号在名称映射中，更新基础名称
+        if target_symbol.qname in self.name_mappings:
+            current.id = self.name_mappings[target_symbol.qname]
         
-        for i, attr in enumerate(attrs):
-            if current_symbol.scope and attr in current_symbol.scope.symbols:
-                current_symbol = current_symbol.scope.symbols[attr]
-                
-                # 检查是否需要转换为简单名称
-                if i == len(attrs) - 1:  # 最后一个属性
-                    if current_symbol.qname in self.name_mappings:
-                        new_name = self.name_mappings[current_symbol.qname]
-                        return ast.Name(id=new_name, ctx=node.ctx)
-            else:
-                # 无法继续解析，保持原样
-                break
-                
-        # 如果无法完全解析，递归处理子节点
+        # 对于类的嵌套属性（如 torch.nn），保持属性访问的结构
+        # 不尝试解析为单独的符号，因为嵌套类通常应该保持为属性访问
         return self.generic_visit(node)
         
     def visit_Global(self, node: ast.Global):
@@ -1611,6 +1612,14 @@ class AdvancedNodeTransformer(ast.NodeTransformer):
     def visit_Nonlocal(self, node: ast.Nonlocal):
         """转换nonlocal声明"""
         # Nonlocal声明需要特殊处理
+        return node
+        
+    def visit_Assign(self, node: ast.Assign):
+        """转换赋值语句"""
+        # 转换赋值语句的右侧表达式
+        node.value = self.visit(node.value)
+        # 转换所有的目标（虽然通常只有一个）
+        node.targets = [self.visit(target) for target in node.targets]
         return node
         
     def visit_Constant(self, node: ast.Constant):
