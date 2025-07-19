@@ -9,7 +9,12 @@ This is a Python code merging tool project that implements utilities for flatten
 ## Architecture
 
 ```
-/Demo/
+PySymphony/
+├── pysymphony/              # 🎵 Main package
+│   ├── __init__.py          # Package initialization
+│   └── auditor/             # 🔍 AST auditor module
+│       ├── __init__.py      # Auditor package exports
+│       └── auditor.py       # Industrial-grade AST auditor implementation
 ├── scripts/                 # Main scripts directory
 │   ├── __init__.py          # Package marker (empty)
 │   └── advanced_merge.py    # 🚀 The code merger with comprehensive AST analysis
@@ -26,8 +31,17 @@ This is a Python code merging tool project that implements utilities for flatten
 │   ├── my_scripts.py        # Main demo script that imports from demo_packages
 │   ├── example_complex_deps.py  # Example showing complex dependency handling
 │   └── example_smart_rename.py  # Example showing smart renaming and ordering
-├── tests/                   # Test files (actual pytest tests)
+├── tests/                   # 🧪 Test files (pytest tests)
 │   ├── __init__.py          # Package marker (empty)
+│   ├── unit/                # Unit tests
+│   │   ├── __init__.py      # Package marker
+│   │   └── test_ast_auditor.py  # AST auditor component tests
+│   ├── integration/         # Integration tests
+│   │   ├── __init__.py      # Package marker
+│   │   └── test_auditor_catches_bad_merge.py  # Antagonistic tests
+│   ├── e2e/                 # End-to-end tests
+│   │   ├── __init__.py      # Package marker
+│   │   └── test_full_merge_workflow.py  # Full workflow tests
 │   ├── fixtures/            # Test fixtures
 │   │   ├── __init__.py      # Package marker (empty)
 │   │   └── test_pkg/        # Test packages for advanced features
@@ -37,11 +51,20 @@ This is a Python code merging tool project that implements utilities for flatten
 │   │       └── complex_deps.py   # Complex multi-layer dependency tests
 │   ├── test_regression.py   # Regression tests
 │   └── test_advanced_merger_fixes.py  # Tests for advanced merger fixes
-├── conftest.py              # Pytest configuration
-└── pytest.ini               # Pytest settings
+├── conftest.py              # Pytest configuration with AST auditor integration
+├── pytest.ini               # Pytest settings
+├── requirements-dev.txt     # Development dependencies
+└── STATIC_ANALYSIS_IMPLEMENTATION.md  # Static analysis documentation
 ```
 
 ## Key Components
+
+### 🔍 AST Auditor System
+- **`pysymphony/auditor/auditor.py`**: Industrial-grade multi-stage AST analysis system:
+  - **SymbolTableBuilder**: Builds comprehensive symbol tables with scope tracking
+  - **ReferenceValidator**: Validates all symbol references with LEGB scope resolution
+  - **PatternChecker**: Detects specific patterns (e.g., multiple main blocks)
+  - **ASTAuditor**: Coordinates all analysis stages and provides detailed error reports
 
 ### 🚀 Code Merger Tool
 - **`scripts/advanced_merge.py`**: The comprehensive implementation with advanced AST analysis:
@@ -50,6 +73,7 @@ This is a Python code merging tool project that implements utilities for flatten
   - **Enhanced attribute resolution**: Supports nested attribute chains (e.g., `a.b.c.d`)
   - **Correct nonlocal/global handling**: Properly tracks and preserves scope declarations
   - **Import alias mapping**: Complete support for all import patterns and aliases
+  - **Main block deduplication**: Correctly handles module initialization statements
 
 ### Example Code
 - **`examples/demo_packages/a_pkg/a.py`**: Contains `global_same()`, `hello()`, `hello2()` - demonstrates internal dependencies
@@ -58,18 +82,37 @@ This is a Python code merging tool project that implements utilities for flatten
 - **`examples/example_complex_deps.py`**: Example showing how the merger handles complex dependencies
 - **`examples/example_smart_rename.py`**: Example demonstrating smart renaming and ordering features
 
-### Test Code
-- **`tests/fixtures/test_pkg/`**: Test fixtures used by actual pytest tests
-  - `unique_func.py`: Functions with unique names that shouldn't be renamed
-  - `order_test.py`: Multi-level dependencies to test correct ordering
-  - `complex_deps.py`: Complex dependency chains for advanced testing
+### Test Architecture
+The project implements a professional layered testing architecture:
+
+#### Unit Tests (`tests/unit/`)
+- **`test_ast_auditor.py`**: Tests individual AST auditor components in isolation
+
+#### Integration Tests (`tests/integration/`)
+- **`test_auditor_catches_bad_merge.py`**: Antagonistic tests that verify the auditor catches actual merge errors
+
+#### End-to-End Tests (`tests/e2e/`)
+- **`test_full_merge_workflow.py`**: Tests complete workflows from merging to execution
+
+#### Test Fixtures (`tests/fixtures/test_pkg/`)
+- **`unique_func.py`**: Functions with unique names that shouldn't be renamed
+- **`order_test.py`**: Multi-level dependencies to test correct ordering
+- **`complex_deps.py`**: Complex dependency chains for advanced testing
+
+#### Other Tests
 - **`tests/test_advanced_merger_fixes.py`**: Comprehensive tests for advanced merger fixes
 - **`tests/test_regression.py`**: Regression tests to ensure stability
+- **`tests/test_static_checks.py`**: Tests for static analysis functionality
 
 ## Development Commands
 
-This project lacks standard Python configuration files (no requirements.txt, setup.py, pyproject.toml). To work with the code:
+### Setup
+```bash
+# Install development dependencies
+pip install -r requirements-dev.txt
+```
 
+### Running Examples
 ```bash
 # Run example scripts (requires PYTHONPATH)
 PYTHONPATH=examples python examples/my_scripts.py
@@ -79,9 +122,26 @@ PYTHONPATH=. python examples/example_smart_rename.py
 # Run the code merger tool on examples
 python scripts/advanced_merge.py examples/my_scripts.py examples
 python scripts/advanced_merge.py examples/example_complex_deps.py .
+```
 
-# Run pytest (only runs actual tests, not examples)
+### Testing
+```bash
+# Run all tests
 pytest
+
+# Run tests with merged scripts (tests the merger output)
+pytest --merged
+
+# Run specific test categories
+pytest tests/unit/              # Unit tests only
+pytest tests/integration/       # Integration tests only
+pytest tests/e2e/              # End-to-end tests only
+
+# Run with verbose output
+pytest -v
+
+# Run with coverage
+pytest --cov=pysymphony --cov=scripts
 ```
 
 ### Import Structure
@@ -259,18 +319,49 @@ def main_handler(data):       # Level 4: Depends on processor & formatter
 ```
 
 
+## Quality Assurance
+
+### Static Analysis
+The project uses a multi-stage AST auditor (`pysymphony.auditor.ASTAuditor`) that performs:
+1. **Symbol Table Building**: Tracks all definitions and their scopes
+2. **Reference Validation**: Ensures all references resolve correctly
+3. **Pattern Checking**: Detects problematic patterns (e.g., multiple main blocks)
+4. **Top-level Conflict Detection**: Identifies duplicate imports and definitions
+
+### Continuous Integration
+- All tests run automatically on GitHub Actions
+- Static checks are mandatory and run on every test execution
+- Both original and merged scripts are validated
+
 ## Development Environment
 
-- **Language**: Python 3 (no external dependencies required)
+- **Language**: Python 3.8+ (uses standard library only for core functionality)
 - **IDE**: IntelliJ IDEA/PyCharm (`.idea/` directory present)
 - **Git**: Git repository with GitHub integration
-- **Dependencies**: Uses only Python standard library (`ast`, `pathlib`, `typing`)
+- **Core Dependencies**: Uses only Python standard library (`ast`, `pathlib`, `typing`)
+- **Dev Dependencies**: 
+  - `pytest>=7.0.0` - Testing framework
+  - `pyflakes>=3.0.0` - Fast static analysis
+  - `flake8>=6.0,<7.0` - Backup static analysis
 
-## Recent Fixes (Issue #3)
+## Recent Improvements
+
+### Issue #18: Industrial-Grade Testing System
+1. **AST Auditor**: Implemented multi-stage static analysis system
+2. **Test Architecture**: Created layered test structure (unit/integration/e2e)
+3. **Antagonistic Testing**: Added tests that verify error detection
+4. **pyflakes Integration**: Enhanced static checks with pyflakes API
+
+### Issue #3: Core Functionality Fixes
 1. **TypeError Fix**: Corrected `current_module_path` method call
 2. **Nested Attribute Access**: Full support for deep attribute chains
 3. **Scope Preservation**: Proper handling of nonlocal/global variables
 4. **Import Mapping**: Enhanced resolution of imported symbols
+
+### Other Improvements
+- **Main Block Deduplication**: Fixed duplicate main block issue
+- **Built-in Names**: Corrected recognition of Python built-ins
+- **Import Conflict Detection**: Enhanced duplicate import detection
 
 ## Project Purpose
 
