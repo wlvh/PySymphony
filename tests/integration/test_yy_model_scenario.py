@@ -10,6 +10,7 @@ import pytest
 import tempfile
 import subprocess
 import sys
+import os
 from pathlib import Path
 import py_compile
 
@@ -138,28 +139,25 @@ except Exception as e:
         assert import_result.returncode == 0, f"Module import failed: {import_result.stderr}"
         assert "OK" in import_result.stdout, f"Import test failed: {import_result.stdout}"
         
-        # 验证运行（部分成功即可，因为可能有未解析的依赖）
+        # Issue #28 的核心验收标准：合并后的脚本必须能够运行，不再抛出 NameError
+        # 设置 PYTHONPATH 以便正确解析导入路径
+        env = os.environ.copy()
+        env['PYTHONPATH'] = str(tmpdir)
         run_cmd = [sys.executable, str(merged_file)]
-        run_result = subprocess.run(run_cmd, capture_output=True, text=True, cwd=str(tmpdir))
+        run_result = subprocess.run(run_cmd, capture_output=True, text=True, cwd=str(tmpdir), env=env)
         
-        # Issue #28 的核心问题：如果没有正确的导入重注入，这里会失败
-        # 我们的实现应该至少让代码能够开始执行
-        if run_result.returncode != 0:
-            # 检查是否是 NameError（未解析的依赖）
-            if "NameError" in run_result.stderr and "DiskStockDataReader" in run_result.stderr:
-                # 这正是 Issue #28 试图解决的问题
-                print(f"Known limitation: {run_result.stderr}")
-                # 但至少应该有一些改进，比如重新注入了某些导入
-                assert "# Re-injected import aliases" in merged_content or \
-                       "from scripts" in merged_content, \
-                       "No import reinjection attempted"
-            else:
-                # 其他错误应该报告
-                pytest.fail(f"Unexpected error: {run_result.stderr}")
-        else:
-            # 如果成功运行，验证输出
-            assert "Predictions completed!" in run_result.stdout
-            assert "OK" in run_result.stdout
+        # 不再允许 NameError - 这是 Issue #28 的根本目标
+        assert run_result.returncode == 0, f"Merged script must run without NameError: {run_result.stderr}"
+        
+        # 验证输出
+        assert "Predictions completed!" in run_result.stdout, f"Expected output not found: {run_result.stdout}"
+        assert "OK" in run_result.stdout, f"Expected 'OK' not found: {run_result.stdout}"
+        
+        # 验证重新注入的导入存在
+        if "DiskStockDataReader" not in merged_content:
+            # 如果 DiskStockDataReader 没有被内联，应该有重新注入的导入
+            assert "from scripts.crossformer import DiskStockDataReader" in merged_content, \
+                "DiskStockDataReader import should be reinjected"
 
 
 def test_yy_model_with_json_conflict():
@@ -257,6 +255,100 @@ if __name__ == "__main__":
         else:
             # 如果失败，检查是否是预期的限制
             print(f"Execution failed (may be expected): {run_result.stderr}")
+
+
+def test_diskstocker_only():
+    """DiskStockDataReader ONLY 金丝雀测试
+    
+    验证当只使用 DiskStockDataReader 时，导入能够正确重新注入
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir = Path(tmpdir)
+        
+        # 创建 scripts/crossformer.py
+        scripts_dir = tmpdir / "scripts"
+        scripts_dir.mkdir()
+        (scripts_dir / "__init__.py").write_text("")
+        
+        crossformer_py = scripts_dir / "crossformer.py"
+        crossformer_py.write_text('''
+class DiskStockDataReader:
+    """数据读取器"""
+    def __init__(self, path):
+        self.path = path
+    
+    def read(self):
+        return f"data from {self.path}"
+''')
+        
+        # 创建 a.py - 直接使用 DiskStockDataReader
+        a_py = tmpdir / "a.py"
+        a_py.write_text('''
+from scripts.crossformer import DiskStockDataReader
+
+def foo():
+    """创建并返回 DiskStockDataReader 实例"""
+    return DiskStockDataReader("test_path")
+''')
+        
+        # 创建 main.py - 调用 foo()
+        main_py = tmpdir / "main.py"
+        main_py.write_text('''
+from a import foo
+
+def main():
+    reader = foo()
+    data = reader.read()
+    print(f"Got: {data}")
+    return True
+
+if __name__ == "__main__":
+    if main():
+        print("Success!")
+''')
+        
+        # 运行合并工具
+        merger_path = Path(__file__).parent.parent.parent / "scripts" / "advanced_merge.py"
+        cmd = [sys.executable, str(merger_path), str(main_py), str(tmpdir)]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        assert result.returncode == 0, f"Merger failed: {result.stderr}"
+        
+        merged_file = tmpdir / "main_advanced_merged.py"
+        merged_content = merged_file.read_text()
+        
+        print("=== DiskStockDataReader ONLY test ===")
+        print(merged_content)
+        print("=== End ===")
+        
+        # 验证关键点
+        # 1. foo 函数应该被内联
+        assert "def foo():" in merged_content or "def a_foo():" in merged_content, \
+            "Function foo should be inlined"
+        
+        # 2. 检查 DiskStockDataReader 是否被内联
+        if "class scripts_crossformer_DiskStockDataReader:" in merged_content:
+            # 被内联并重命名了，这是正常的
+            assert "return scripts_crossformer_DiskStockDataReader" in merged_content, \
+                "Renamed DiskStockDataReader should be used"
+        elif "class DiskStockDataReader:" not in merged_content:
+            # 3. 如果没有内联，必须有重新注入的导入
+            assert "from scripts.crossformer import DiskStockDataReader" in merged_content, \
+                "DiskStockDataReader import must be reinjected"
+        
+        # 4. 最重要的：脚本必须能够运行
+        run_result = subprocess.run(
+            [sys.executable, str(merged_file)],
+            capture_output=True,
+            text=True,
+            cwd=str(tmpdir)
+        )
+        
+        assert run_result.returncode == 0, \
+            f"Script must run without errors. Got: {run_result.stderr}"
+        assert "Got: data from test_path" in run_result.stdout, \
+            f"Expected output not found: {run_result.stdout}"
+        assert "Success!" in run_result.stdout
 
 
 if __name__ == "__main__":

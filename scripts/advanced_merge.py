@@ -1257,6 +1257,30 @@ class AdvancedCodeMerger:
         """检查两个 AST 节点是否相等"""
         return ast.dump(node1) == ast.dump(node2)
     
+    def _needs_reinject(self, symbol: Symbol, output_symbols: Set[Symbol], visited: Set[Symbol] = None) -> bool:
+        """递归检查符号是否需要重新注入
+        
+        通过递归向上回溯别名链，检查是否有任何依赖不在输出符号集合中
+        """
+        if visited is None:
+            visited = set()
+            
+        if symbol in visited:
+            return False
+        visited.add(symbol)
+        
+        # 如果符号本身不在输出集合中，需要重新注入
+        if symbol not in output_symbols and symbol.symbol_type in ('function', 'class', 'variable'):
+            return True
+            
+        # 递归检查所有依赖
+        if symbol.dependencies:
+            for dep in symbol.dependencies:
+                if self._needs_reinject(dep, output_symbols, visited):
+                    return True
+                    
+        return False
+    
     def _collect_and_reinject_imports(self, output_symbols: Set[Symbol]) -> List[str]:
         """收集并重新注入必要的导入别名
         
@@ -1266,108 +1290,131 @@ class AdvancedCodeMerger:
         import_set = set()  # 用于去重
         processed_symbols = set()  # 跟踪已处理的符号
         
-        # 遍历所有需要的符号，查找 import_alias 类型
+        # 收集所有相关模块中的导入别名
+        # 不仅仅是 needed_symbols，还包括所有被访问过的模块中的导入
+        all_import_aliases = []
+        
+        # 1. 从 needed_symbols 中收集
         for symbol in self.needed_symbols:
-            if symbol.symbol_type == 'import_alias' and symbol.qname not in processed_symbols:
-                processed_symbols.add(symbol.qname)
+            if symbol.symbol_type == 'import_alias':
+                all_import_aliases.append(symbol)
                 
-                # 对于 import_alias，我们需要检查它依赖的符号是否被内联
-                # 如果依赖的符号没有被内联，就需要重新注入导入语句
-                
-                # 检查符号是否需要重新注入
-                should_reinject = False
-                
-                # 1. 如果符号在 name_mappings 中且被重命名了，可能需要重新注入
-                if symbol.qname in self.name_mappings and self.name_mappings[symbol.qname] != symbol.name:
-                    # 如果是外部导入的别名被重命名了（如 json -> json__module），需要重新注入
-                    if not symbol.dependencies or (symbol.dependencies and 
-                                                  all(d.symbol_type == 'module' for d in symbol.dependencies)):
+        # 2. 从所有被分析的模块中收集导入别名
+        # 这样可以捕获那些在类内部使用但没有被正确追踪的导入
+        for module_path in self.visitor.module_symbols:
+            module_qname = self.visitor.get_module_qname(module_path)
+            # 查找该模块中的所有导入别名
+            for qname, symbol in self.visitor.all_symbols.items():
+                if (symbol.symbol_type == 'import_alias' and 
+                    qname.startswith(module_qname + '.') and
+                    symbol not in all_import_aliases):
+                    # 只添加那些属于已处理模块的导入别名
+                    if any(s.scope.module_path == module_path for s in self.needed_symbols):
+                        all_import_aliases.append(symbol)
+        
+        # 遍历所有收集到的导入别名
+        for symbol in all_import_aliases:
+            if symbol.qname in processed_symbols:
+                continue
+            processed_symbols.add(symbol.qname)
+            
+            # 对于 import_alias，我们需要检查它依赖的符号是否被内联
+            # 如果依赖的符号没有被内联，就需要重新注入导入语句
+            
+            # 检查符号是否需要重新注入
+            should_reinject = False
+            
+            # 1. 如果符号在 name_mappings 中且被重命名了，可能需要重新注入
+            if symbol.qname in self.name_mappings and self.name_mappings[symbol.qname] != symbol.name:
+                # 如果是外部导入的别名被重命名了（如 json -> json__module），需要重新注入
+                if not symbol.dependencies or (symbol.dependencies and 
+                                              all(d.symbol_type == 'module' for d in symbol.dependencies)):
+                    should_reinject = True
+            
+            # 2. 递归检查依赖链，看是否有未被内联的符号
+            if not should_reinject and symbol.dependencies:
+                # 使用递归方法检查整个依赖链
+                for dep in symbol.dependencies:
+                    if self._needs_reinject(dep, output_symbols):
                         should_reinject = True
-                
-                # 2. 如果依赖的符号没有被内联，也需要重新注入
-                if not should_reinject and symbol.dependencies:
-                    for dep in symbol.dependencies:
-                        # 如果依赖的符号不在输出符号集合中，需要重新注入导入
-                        if dep not in output_symbols and dep.symbol_type in ('function', 'class', 'variable'):
-                            should_reinject = True
-                            break
-                
-                if not should_reinject:
-                    continue
-                
-                # 获取导入节点信息
-                node = symbol.def_node
-                
-                if isinstance(node, ast.Import):
-                    # 处理 import xxx as yyy 格式
-                    for alias in node.names:
-                        module_name = alias.name
-                        alias_name = alias.asname if alias.asname else alias.name
-                        
-                        # 检查当前别名对应的符号
-                        if symbol.name != alias_name:
-                            continue
-                        
-                        # 检查是否需要重命名
-                        new_name = None
-                        if symbol.qname in self.name_mappings:
-                            new_name = self.name_mappings[symbol.qname]
-                        else:
-                            # 也检查带类型后缀的版本
-                            type_qname = f"{symbol.qname}#import_alias"
-                            if type_qname in self.name_mappings:
-                                new_name = self.name_mappings[type_qname]
-                        
-                        # 生成导入语句
-                        if new_name and new_name != alias_name:
-                            import_stmt = f"import {module_name} as {new_name}"
-                        elif alias.asname:
-                            import_stmt = f"import {module_name} as {alias_name}"
-                        else:
-                            import_stmt = f"import {module_name}"
-                            
-                        if import_stmt not in import_set:
-                            import_set.add(import_stmt)
-                            imports_to_reinject.append(import_stmt)
-                            
-                elif isinstance(node, ast.ImportFrom):
-                    # 处理 from xxx import yyy as zzz 格式
-                    module = node.module if node.module else ""
-                    level = node.level
+                        break
+            
+            if not should_reinject:
+                continue
+            
+            # 获取导入节点信息
+            node = symbol.def_node
+            
+            if isinstance(node, ast.Import):
+                # 处理 import xxx as yyy 格式
+                for alias in node.names:
+                    module_name = alias.name
+                    alias_name = alias.asname if alias.asname else alias.name
                     
-                    # 跳过相对导入
-                    if level > 0:
+                    # 检查当前别名对应的符号
+                    if symbol.name != alias_name:
                         continue
+                    
+                    # 检查是否需要重命名
+                    new_name = None
+                    if symbol.qname in self.name_mappings:
+                        new_name = self.name_mappings[symbol.qname]
+                    else:
+                        # 也检查带类型后缀的版本
+                        type_qname = f"{symbol.qname}#import_alias"
+                        if type_qname in self.name_mappings:
+                            new_name = self.name_mappings[type_qname]
+                    
+                    # 生成导入语句
+                    if new_name and new_name != alias_name:
+                        import_stmt = f"import {module_name} as {new_name}"
+                    elif alias.asname:
+                        import_stmt = f"import {module_name} as {alias_name}"
+                    else:
+                        import_stmt = f"import {module_name}"
                         
-                    for alias in node.names:
-                        name = alias.name
-                        alias_name = alias.asname if alias.asname else alias.name
+                    if import_stmt not in import_set:
+                        import_set.add(import_stmt)
+                        imports_to_reinject.append(import_stmt)
                         
-                        # 检查当前别名对应的符号
-                        if symbol.name != alias_name:
-                            continue
+            elif isinstance(node, ast.ImportFrom):
+                # 处理 from xxx import yyy as zzz 格式
+                module = node.module if node.module else ""
+                level = node.level
+                
+                # 跳过相对导入
+                if level > 0:
+                    continue
+                    
+                for alias in node.names:
+                    name = alias.name
+                    alias_name = alias.asname if alias.asname else alias.name
+                    
+                    # 检查当前别名对应的符号
+                    if symbol.name != alias_name:
+                        continue
+                    
+                    # 检查是否需要重命名
+                    new_name = None
+                    if symbol.qname in self.name_mappings:
+                        new_name = self.name_mappings[symbol.qname]
+                    else:
+                        # 也检查带类型后缀的版本
+                        type_qname = f"{symbol.qname}#import_alias"
+                        if type_qname in self.name_mappings:
+                            new_name = self.name_mappings[type_qname]
+                    
+                    # 生成导入语句
+                    if new_name and new_name != alias_name:
+                        import_stmt = f"from {module} import {name} as {new_name}"
+                    elif alias.asname:
+                        import_stmt = f"from {module} import {name} as {alias_name}"
+                    else:
+                        import_stmt = f"from {module} import {name}"
                         
-                        # 检查是否需要重命名
-                        new_name = None
-                        if symbol.qname in self.name_mappings:
-                            new_name = self.name_mappings[symbol.qname]
-                        else:
-                            # 也检查带类型后缀的版本
-                            type_qname = f"{symbol.qname}#import_alias"
-                            if type_qname in self.name_mappings:
-                                new_name = self.name_mappings[type_qname]
-                        
-                        # 生成导入语句
-                        if new_name and new_name != alias_name:
-                            import_stmt = f"from {module} import {name} as {new_name}"
-                        elif alias.asname:
-                            import_stmt = f"from {module} import {name} as {alias_name}"
-                        else:
-                            import_stmt = f"from {module} import {name}"
-                            
-                        if import_stmt not in import_set:
-                            import_set.add(import_stmt)
-                            imports_to_reinject.append(import_stmt)
+                    if import_stmt not in import_set:
+                        import_set.add(import_stmt)
+                        imports_to_reinject.append(import_stmt)
         
         # 排序以保证输出的确定性
         return sorted(imports_to_reinject)
