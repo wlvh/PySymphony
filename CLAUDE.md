@@ -361,30 +361,6 @@ The project uses a multi-stage AST auditor (`pysymphony.auditor.ASTAuditor`) tha
   - `pyflakes>=3.0.0` - Fast static analysis
   - `flake8>=6.0,<7.0` - Backup static analysis
 
-## Recent Improvements
-
-### Issue #34: Core Stability Sprint
-1. **B1 - Performance Optimization**: Fixed O(N²) scope lookup by implementing `defnode_to_scope` hash mapping
-2. **B2 - Runtime Alias Conflicts**: Added `__mod` suffix to all import aliases to prevent conflicts with local definitions
-3. **B3 - Attribute Reference Validation**: Enhanced `ReferenceValidator` to check attribute existence on objects
-4. **B4 - Class-Method Topology**: Fixed topological sorting to ensure classes are always defined before their methods
-
-### Issue #18: Industrial-Grade Testing System
-1. **AST Auditor**: Implemented multi-stage static analysis system
-2. **Test Architecture**: Created layered test structure (unit/integration/e2e)
-3. **Antagonistic Testing**: Added tests that verify error detection
-4. **pyflakes Integration**: Enhanced static checks with pyflakes API
-
-### Issue #3: Core Functionality Fixes
-1. **TypeError Fix**: Corrected `current_module_path` method call
-2. **Nested Attribute Access**: Full support for deep attribute chains
-3. **Scope Preservation**: Proper handling of nonlocal/global variables
-4. **Import Mapping**: Enhanced resolution of imported symbols
-
-### Other Improvements
-- **Main Block Deduplication**: Fixed duplicate main block issue
-- **Built-in Names**: Corrected recognition of Python built-ins
-- **Import Conflict Detection**: Enhanced duplicate import detection
 
 ## Project Purpose
 
