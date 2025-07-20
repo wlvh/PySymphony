@@ -206,10 +206,15 @@ python scripts/advanced_merge.py examples/example_complex_deps.py .
 - **Topological sorting**: Ensures correct function definition order using graph algorithms
   - Fixed algorithm to properly handle dependency chains
   - Reverses final order to ensure dependencies are defined first
+  - **B4 Fix**: Ensures classes are always defined before their methods
 - **Conflict detection**: Analyzes symbol frequency to determine renaming necessity
 - **Import alias resolution**: Correctly handles `import X as Y` patterns
   - Maps aliases to their corresponding renamed functions
   - Preserves original alias relationships in merged code
+  - **B2 Fix**: Adds `__mod` suffix to all import aliases to prevent runtime conflicts
+- **Performance optimizations**:
+  - **B1 Fix**: O(1) scope lookup using `defnode_to_scope` hash mapping
+  - Efficient symbol resolution avoiding O(N²) complexity
 
 ## Demo Dependency Patterns
 
@@ -345,6 +350,12 @@ The project uses a multi-stage AST auditor (`pysymphony.auditor.ASTAuditor`) tha
   - `flake8>=6.0,<7.0` - Backup static analysis
 
 ## Recent Improvements
+
+### Issue #34: Core Stability Sprint
+1. **B1 - Performance Optimization**: Fixed O(N²) scope lookup by implementing `defnode_to_scope` hash mapping
+2. **B2 - Runtime Alias Conflicts**: Added `__mod` suffix to all import aliases to prevent conflicts with local definitions
+3. **B3 - Attribute Reference Validation**: Enhanced `ReferenceValidator` to check attribute existence on objects
+4. **B4 - Class-Method Topology**: Fixed topological sorting to ensure classes are always defined before their methods
 
 ### Issue #18: Industrial-Grade Testing System
 1. **AST Auditor**: Implemented multi-stage static analysis system
