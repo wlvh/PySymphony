@@ -641,9 +641,18 @@ class ContextAwareVisitor(ast.NodeVisitor):
         )
         self.push_scope(class_scope)
         
-        # 分析类体
+        # 分析类体，并收集类方法的依赖
         for stmt in node.body:
             self.visit(stmt)
+            
+            # 如果是方法定义（FunctionDef 或 AsyncFunctionDef），收集其依赖到类符号
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                # 获取方法符号
+                method_qname = f"{qname}.{stmt.name}"
+                if method_qname in self.all_symbols:
+                    method_symbol = self.all_symbols[method_qname]
+                    # 将方法的依赖添加到类的依赖中
+                    symbol.dependencies.update(method_symbol.dependencies)
             
         self.pop_scope()
         
@@ -1188,6 +1197,15 @@ class AdvancedCodeMerger:
                 for dep in symbol.dependencies:
                     if dep not in needed:
                         to_process.append(dep)
+                        
+            # 如果是类，使用 O(1) 索引收集方法依赖
+            if symbol.symbol_type == 'class':
+                # 从索引中获取该类的所有方法
+                for method_sym in self.class_children.get(symbol.qname, []):
+                    # 添加方法的所有依赖
+                    for method_dep in method_sym.dependencies:
+                        if method_dep not in needed and method_dep != symbol:
+                            to_process.append(method_dep)
         
         # 阶段二：收集实际使用的运行时导入依赖
         runtime_deps = self._collect_runtime_import_dependencies(needed)
@@ -2098,8 +2116,23 @@ class AdvancedNodeTransformer(ast.NodeTransformer):
         """转换赋值语句"""
         # 转换赋值语句的右侧表达式
         node.value = self.visit(node.value)
-        # 转换所有的目标（虽然通常只有一个）
-        node.targets = [self.visit(target) for target in node.targets]
+        
+        # 转换所有的目标
+        new_targets = []
+        for target in node.targets:
+            if isinstance(target, ast.Name) and isinstance(target.ctx, ast.Store):
+                # 查找这个变量名对应的符号
+                symbol = self.resolve_name_to_symbol(target.id)
+                if symbol and symbol.symbol_type == 'variable' and symbol.qname in self.name_mappings:
+                    # 使用映射的新名称
+                    new_target = ast.Name(id=self.name_mappings[symbol.qname], ctx=ast.Store())
+                    new_targets.append(new_target)
+                else:
+                    new_targets.append(self.visit(target))
+            else:
+                new_targets.append(self.visit(target))
+        
+        node.targets = new_targets
         return node
         
     def visit_Constant(self, node: ast.Constant):
