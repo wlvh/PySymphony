@@ -1263,7 +1263,7 @@ class AdvancedCodeMerger:
             
         for symbol in symbols:
             for dep in symbol.dependencies:
-                if dep in symbols:
+                if dep in symbols and dep != symbol:  # 忽略自引用
                     graph[dep].add(symbol)
                     in_degree[symbol] += 1
                     
@@ -1293,12 +1293,94 @@ class AdvancedCodeMerger:
         # 检查循环依赖
         if len(sorted_symbols) != len(symbols):
             remaining = symbols - set(sorted_symbols)
-            raise CircularDependencyError(
-                f"Circular dependency detected among symbols: "
-                f"{', '.join(s.qname for s in remaining)}"
-            )
+            # 找出循环依赖的详细路径
+            cycles = self._find_cycles_in_graph(graph, remaining)
+            error_msg = "Circular dependency detected:\n"
+            if cycles:
+                for i, cycle in enumerate(cycles, 1):
+                    cycle_str = " -> ".join(s.qname for s in cycle)
+                    error_msg += f"  Cycle {i}: {cycle_str}\n"
+            else:
+                # 如果找不到明确的循环，列出所有剩余符号
+                error_msg += f"  Involved symbols: {', '.join(s.qname for s in remaining)}\n"
+                
+            # 添加更详细的调试信息
+            error_msg += "\nDetailed dependency information:\n"
+            for sym in sorted(remaining, key=lambda s: s.qname):  # 显示所有剩余符号
+                # 显示所有依赖，不只是在remaining中的
+                all_deps = [d.qname for d in sym.dependencies]
+                deps_in_remaining = [d.qname for d in sym.dependencies if d in remaining]
+                deps_in_output = [d.qname for d in sym.dependencies if d in symbols and d not in remaining]
+                
+                if all_deps:
+                    error_msg += f"  {sym.qname}:\n"
+                    error_msg += f"    All dependencies: {', '.join(all_deps)}\n"
+                    if deps_in_remaining:
+                        error_msg += f"    Dependencies in cycle: {', '.join(deps_in_remaining)}\n"
+                    if deps_in_output:
+                        error_msg += f"    Dependencies already processed: {', '.join(deps_in_output)}\n"
+            
+            raise CircularDependencyError(error_msg)
             
         return sorted_symbols
+        
+    def _find_cycles_in_graph(self, graph: Dict[Symbol, Set[Symbol]], candidates: Set[Symbol]) -> List[List[Symbol]]:
+        """在图中查找循环依赖的路径
+        
+        使用DFS算法查找所有循环路径
+        """
+        cycles = []
+        
+        # 构建反向图（用于查找谁依赖于某个符号）
+        reverse_graph = defaultdict(set)
+        for node, deps in graph.items():
+            for dep in deps:
+                reverse_graph[dep].add(node)
+        
+        # Tarjan算法查找强连通分量
+        index_counter = [0]
+        stack = []
+        lowlinks = {}
+        index = {}
+        on_stack = defaultdict(bool)
+        
+        def strongconnect(node: Symbol):
+            """Tarjan算法的核心函数"""
+            index[node] = index_counter[0]
+            lowlinks[node] = index_counter[0]
+            index_counter[0] += 1
+            stack.append(node)
+            on_stack[node] = True
+            
+            # 考虑后继节点
+            for successor in graph.get(node, []):
+                if successor in candidates:
+                    if successor not in index:
+                        strongconnect(successor)
+                        lowlinks[node] = min(lowlinks[node], lowlinks[successor])
+                    elif on_stack[successor]:
+                        lowlinks[node] = min(lowlinks[node], index[successor])
+            
+            # 如果node是强连通分量的根
+            if lowlinks[node] == index[node]:
+                component = []
+                while True:
+                    w = stack.pop()
+                    on_stack[w] = False
+                    component.append(w)
+                    if w == node:
+                        break
+                # 只添加包含多个节点的强连通分量（即循环）
+                if len(component) > 1:
+                    component.reverse()  # 恢复正确的顺序
+                    cycles.append(component)
+        
+        # 对每个候选节点运行Tarjan算法
+        for symbol in candidates:
+            if symbol not in index:
+                strongconnect(symbol)
+                
+        return cycles
         
     def _ast_equal(self, node1: ast.AST, node2: ast.AST) -> bool:
         """检查两个 AST 节点是否相等"""
@@ -1639,6 +1721,24 @@ class AdvancedCodeMerger:
         for s in self.needed_symbols:
             if s.symbol_type in ('import_alias', 'module', 'parameter'):
                 continue
+                
+            # 检查是否是类的方法（通过判断qname中是否包含类名）
+            is_class_method = False
+            if s.symbol_type == 'function' and '.' in s.qname:
+                # 检查是否有对应的类符号
+                parts = s.qname.rsplit('.', 1)
+                if len(parts) == 2:
+                    potential_class_qname = parts[0]
+                    # 查找是否有对应的类
+                    for other_s in self.needed_symbols:
+                        if other_s.symbol_type == 'class' and other_s.qname == potential_class_qname:
+                            is_class_method = True
+                            break
+                            
+            if is_class_method:
+                # 类的方法不需要单独输出，它们会随类一起输出
+                continue
+                
             if s.is_nested:
                 # 检查是否有其他符号依赖这个嵌套符号
                 # 暂时保留所有嵌套类，因为它们可能被属性访问使用
