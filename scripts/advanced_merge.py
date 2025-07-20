@@ -93,6 +93,7 @@ class ContextAwareVisitor(ast.NodeVisitor):
         self.future_imports: Set[str] = set()
         self.analyzed_modules: Set[Path] = set()
         self.in_try_import_error: bool = False  # 标记是否在 try...except ImportError 块中
+        self.defnode_to_scope: Dict[ast.AST, Scope] = {}  # def_node -> Scope 映射，优化查找性能
         
     def push_scope(self, scope: Scope):
         """进入新作用域"""
@@ -285,6 +286,7 @@ class ContextAwareVisitor(ast.NodeVisitor):
             scope=self.current_scope()
         )
         self.all_symbols[module_qname] = module_symbol
+        self.defnode_to_scope[module_symbol.def_node] = module_symbol.scope
         
         for stmt in node.body:
             if isinstance(stmt, (ast.Import, ast.ImportFrom)):
@@ -349,6 +351,7 @@ class ContextAwareVisitor(ast.NodeVisitor):
                     
                     self.current_scope().symbols[alias_name] = symbol
                     self.all_symbols[symbol.qname] = symbol
+                    self.defnode_to_scope[symbol.def_node] = symbol.scope
             else:
                 # 外部导入
                 # 创建导入别名符号（即使是外部导入）
@@ -363,6 +366,7 @@ class ContextAwareVisitor(ast.NodeVisitor):
                 
                 self.current_scope().symbols[alias_name] = symbol
                 self.all_symbols[symbol.qname] = symbol
+                self.defnode_to_scope[symbol.def_node] = symbol.scope
                 
                 # 如果在 try...except ImportError 块中，不要添加到外部导入列表
                 if not self.in_try_import_error:
@@ -429,6 +433,7 @@ class ContextAwareVisitor(ast.NodeVisitor):
                     
                 self.current_scope().symbols[alias_name] = symbol
                 self.all_symbols[symbol.qname] = symbol
+                self.defnode_to_scope[symbol.def_node] = symbol.scope
                 self.module_symbols[self.current_module_path][alias_name] = symbol
         else:
             # 外部导入
@@ -451,6 +456,7 @@ class ContextAwareVisitor(ast.NodeVisitor):
                 # 但仍然注册符号
                 self.current_scope().symbols[alias_name] = symbol
                 self.all_symbols[symbol.qname] = symbol
+                self.defnode_to_scope[symbol.def_node] = symbol.scope
                 self.module_symbols[self.current_module_path][alias_name] = symbol
             
             # 如果在 try...except ImportError 块中，不要添加到外部导入列表
@@ -524,8 +530,10 @@ class ContextAwareVisitor(ast.NodeVisitor):
             # 给新符号一个唯一的内部标识
             unique_qname = f"{qname}#{symbol.symbol_type}"
             self.all_symbols[unique_qname] = symbol
+            self.defnode_to_scope[symbol.def_node] = symbol.scope
         else:
             self.all_symbols[qname] = symbol
+            self.defnode_to_scope[symbol.def_node] = symbol.scope
         
         # 创建函数作用域
         func_scope = Scope(
@@ -632,6 +640,7 @@ class ContextAwareVisitor(ast.NodeVisitor):
         # 注册符号
         self.current_scope().symbols[node.name] = symbol
         self.all_symbols[qname] = symbol
+        self.defnode_to_scope[symbol.def_node] = symbol.scope
         
         # 创建类作用域
         class_scope = Scope(
@@ -715,6 +724,7 @@ class ContextAwareVisitor(ast.NodeVisitor):
                 
                 self.current_scope().symbols[target.id] = symbol
                 self.all_symbols[qname] = symbol
+                self.defnode_to_scope[symbol.def_node] = symbol.scope
                 
     def visit_AnnAssign(self, node: ast.AnnAssign):
         """处理带类型注解的赋值"""
@@ -738,6 +748,7 @@ class ContextAwareVisitor(ast.NodeVisitor):
                 
             self.current_scope().symbols[node.target.id] = symbol
             self.all_symbols[qname] = symbol
+            self.defnode_to_scope[symbol.def_node] = symbol.scope
             
     def visit_For(self, node: Union[ast.For, ast.AsyncFor]):
         """处理 for 循环"""
@@ -1256,6 +1267,16 @@ class AdvancedCodeMerger:
                     graph[dep].add(symbol)
                     in_degree[symbol] += 1
                     
+        # B4 修复：添加类-方法的拓扑边，确保类先于其方法输出
+        for symbol in symbols:
+            if symbol.symbol_type == 'class':
+                # 从索引中获取该类的所有方法
+                for method_sym in self.class_children.get(symbol.qname, []):
+                    if method_sym in symbols:
+                        # 添加边：类 -> 方法（类必须在方法之前）
+                        graph[symbol].add(method_sym)
+                        in_degree[method_sym] += 1
+                    
         # 拓扑排序
         queue = deque([s for s in symbols if in_degree[s] == 0])
         sorted_symbols = []
@@ -1484,27 +1505,16 @@ class AdvancedCodeMerger:
         # 生成映射
         for symbol in all_symbols_to_consider:
             if name_counts[symbol.name] > 1:
-                # 有冲突，需要重命名
+                # 有冲突，需要重命名（非 import_alias 的情况）
                 module_key = self.visitor.get_module_qname(symbol.scope.module_path)
                 module_key = module_key.replace('.', '_').replace('__init__', 'pkg')
-                
-                # 别名一致性保护：检查是否同时有 import_alias 和其他类型
-                symbols_with_same_name = name_to_symbols[symbol.name]
-                has_import_alias = any(s.symbol_type == 'import_alias' for s in symbols_with_same_name)
-                has_other_types = any(s.symbol_type != 'import_alias' for s in symbols_with_same_name)
                 
                 # 对于运行时导入，添加特殊后缀以区分
                 if symbol.is_runtime_import:
                     new_name = f"{symbol.name}__rt"
-                elif has_import_alias and has_other_types and symbol.symbol_type == 'import_alias':
-                    # 如果同时存在 import_alias 和其他类型的符号，优先重命名 import_alias
-                    new_name = f"{symbol.name}__module"
                 else:
-                    # 对于函数，使用模块前缀+类型
-                    if symbol.symbol_type == 'function':
-                        new_name = f"{module_key}_{symbol.name}"
-                    else:
-                        new_name = f"{module_key}_{symbol.name}"
+                    # 对于函数和其他类型，使用模块前缀
+                    new_name = f"{module_key}_{symbol.name}"
                     
                 self.name_mappings[symbol.qname] = new_name
                 
@@ -1574,12 +1584,16 @@ class AdvancedCodeMerger:
                     module = parts[1]
                     name = parts[3]
                     alias = parts[as_idx + 1]
-                    key = (module, name, alias)
+                    # B2 修复：为别名添加 __mod 后缀
+                    new_alias = f"{alias}__mod"
+                    new_imp = f"from {module} import {name} as {new_alias}"
+                    key = (module, name, new_alias)
                 else:
                     # from X import Y
                     module = parts[1]
                     name = parts[3]
                     key = (module, name, name)
+                    new_imp = imp
             else:
                 # import X as Y 或 import X
                 parts = imp.split()
@@ -1588,16 +1602,23 @@ class AdvancedCodeMerger:
                     as_idx = parts.index('as')
                     module = parts[1]
                     alias = parts[as_idx + 1]
-                    key = (module, alias)
+                    # B2 修复：为别名添加 __mod 后缀
+                    new_alias = f"{alias}__mod"
+                    new_imp = f"import {module} as {new_alias}"
+                    key = (module, new_alias)
                 else:
                     # import X
                     module = parts[1]
-                    key = (module, module.split('.')[0])
+                    # B2 修复：对于没有别名的导入，也添加别名以避免冲突
+                    alias = module.split('.')[0]
+                    new_alias = f"{alias}__mod"
+                    new_imp = f"import {module} as {new_alias}"
+                    key = (module, new_alias)
             
             # 检查是否已存在
             if key not in self.import_registry:
                 self.import_registry.add(key)
-                result.append(imp)
+                result.append(new_imp)
         
         return result
     
@@ -1631,6 +1652,14 @@ class AdvancedCodeMerger:
         
         # 5. 生成名称映射
         self.generate_name_mappings(output_symbols)
+        
+        # B2 修复：为所有 import_alias 符号添加 __mod 后缀映射
+        # 这包括那些被过滤掉不输出的外部导入
+        for symbol in self.visitor.all_symbols.values():
+            if symbol.symbol_type == 'import_alias' and symbol.qname not in self.name_mappings:
+                # 为所有导入别名添加 __mod 后缀
+                new_name = f"{symbol.name}__mod"
+                self.name_mappings[symbol.qname] = new_name
         
         # 6. 生成代码
         transformer = AdvancedNodeTransformer(self.name_mappings, self.visitor, self.visitor.all_symbols)
@@ -1713,8 +1742,13 @@ class AdvancedCodeMerger:
                     transformer.current_scope_stack = [module_scope]
             
             for node in main_code:
-                transformed = transformer.visit(copy.deepcopy(node))
-                result_lines.append(ast.unparse(transformed))
+                # 深拷贝节点以避免修改原始 AST
+                node_copy = copy.deepcopy(node)
+                # 应用转换
+                transformed = transformer.visit(node_copy)
+                # 如果是 None，跳过
+                if transformed is not None:
+                    result_lines.append(ast.unparse(transformed))
                 
         final_code = "\n".join(result_lines)
 
@@ -1741,6 +1775,7 @@ class AdvancedNodeTransformer(ast.NodeTransformer):
         self.visitor = visitor
         self.all_symbols = all_symbols
         self.current_scope_stack = []  # 当前的作用域栈
+        self.defnode_to_scope = visitor.defnode_to_scope  # 直接使用 visitor 的映射
         
     def transform_symbol(self, symbol: Symbol) -> ast.AST:
         """转换符号定义"""
@@ -1875,17 +1910,23 @@ class AdvancedNodeTransformer(ast.NodeTransformer):
         node.decorator_list = new_decorators
         
         # 为函数体创建新的作用域
-        # 查找函数对应的作用域
+        # 优先使用哈希映射查找函数对应的作用域
         func_scope = None
-        for sym_qname, sym in self.all_symbols.items():
-            if sym.def_node == symbol.def_node and sym.symbol_type == 'function':
-                # 找到函数符号后，查找其对应的作用域
-                for scope_sym in self.all_symbols.values():
-                    if scope_sym.scope.node == node:
-                        func_scope = scope_sym.scope
-                        break
-                break
-                
+        
+        # 首先尝试从 defnode_to_scope 映射中获取
+        if node in self.defnode_to_scope:
+            func_scope = self.defnode_to_scope[node]
+        else:
+            # 如果映射中没有，则回退到旧的查找逻辑（保证兼容性）
+            for sym_qname, sym in self.all_symbols.items():
+                if sym.def_node == symbol.def_node and sym.symbol_type == 'function':
+                    # 找到函数符号后，查找其对应的作用域
+                    for scope_sym in self.all_symbols.values():
+                        if scope_sym.scope.node == node:
+                            func_scope = scope_sym.scope
+                            break
+                    break
+                    
         if not func_scope:
             # 创建临时作用域
             func_scope = Scope(
@@ -2142,9 +2183,12 @@ class AdvancedNodeTransformer(ast.NodeTransformer):
         
     def visit_Import(self, node: ast.Import):
         """处理 import 语句，确保别名正确重命名"""
-        for alias in node.names:
+        # 深拷贝节点以避免修改原始节点
+        new_node = copy.deepcopy(node)
+        
+        for alias in new_node.names:
             # 计算实际的别名
-            actual_alias = alias.asname if alias.asname else alias.name
+            actual_alias = alias.asname if alias.asname else alias.name.split('.')[0]
             
             # 查找是否需要重命名
             # 首先查找对应的符号
@@ -2152,14 +2196,14 @@ class AdvancedNodeTransformer(ast.NodeTransformer):
             if symbol and symbol.qname in self.name_mappings:
                 # 需要重命名
                 new_name = self.name_mappings[symbol.qname]
-                if alias.asname:
-                    # 如果原来有别名，更新别名
-                    alias.asname = new_name
-                else:
-                    # 如果原来没有别名，添加别名
-                    alias.asname = new_name
+                alias.asname = new_name
+            else:
+                # B2 修复：如果没有找到符号或映射，为导入添加 __mod 后缀
+                # 这处理了外部导入和 try...except ImportError 块中的导入
+                new_name = f"{actual_alias}__mod"
+                alias.asname = new_name
         
-        return node
+        return new_node
     
     def visit_ImportFrom(self, node: ast.ImportFrom):
         """处理 from ... import ... 语句，确保别名正确重命名"""
