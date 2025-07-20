@@ -23,6 +23,14 @@ from dataclasses import dataclass, field
 from collections import defaultdict, deque
 import importlib.util
 
+# 添加项目根目录到 sys.path 以便导入 pysymphony
+_script_dir = Path(__file__).parent
+_project_root = _script_dir.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
+from pysymphony.auditor import ASTAuditor
+
 
 class CircularDependencyError(Exception):
     """循环依赖错误"""
@@ -1575,59 +1583,6 @@ class AdvancedCodeMerger:
         
         return result
     
-    def _static_verify(self, merged_code: str) -> Dict[str, List[str]]:
-        """
-        对合并结果做静态扫描，返回问题字典。
-        """
-        try:
-            tree = ast.parse(merged_code)
-        except SyntaxError as e:
-            return {'syntax_error': [str(e)], 'undefined_names': [], 'duplicate_imports': []}
-
-        # 辅助函数：递归提取赋值目标中的所有名称
-        def _extract_defined_names(target_node):
-            names = set()
-            if isinstance(target_node, ast.Name):
-                names.add(target_node.id)
-            elif isinstance(target_node, (ast.Tuple, ast.List)):
-                for element in target_node.elts:
-                    names.update(_extract_defined_names(element))
-            return names
-
-        defined = set()
-        # 收集所有定义
-        for n in ast.walk(tree):
-            if isinstance(n, (ast.FunctionDef, ast.ClassDef, ast.AsyncFunctionDef)):
-                defined.add(n.name)
-            elif isinstance(n, ast.Assign):
-                # 处理所有赋值目标，包括链式赋值和元组解包
-                for target in n.targets:
-                    defined.update(_extract_defined_names(target))
-            elif isinstance(n, ast.Import):
-                for alias in n.names:
-                    defined.add(alias.asname or alias.name.split('.')[-1])
-            elif isinstance(n, ast.ImportFrom):
-                for alias in n.names:
-                    defined.add(alias.asname or alias.name)
-        
-        # 收集所有使用
-        used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
-        
-        # Python 内置函数和关键字不应被视为未定义
-        import builtins
-        builtin_names = set(dir(builtins))
-        undefined = sorted((used - defined) - builtin_names)
-
-        # 文本级查找重复导入
-        imports_seen, duplicates = set(), []
-        for line in merged_code.splitlines():
-            stripped_line = line.strip()
-            if stripped_line.startswith(('import ', 'from ')):
-                if stripped_line in imports_seen:
-                    duplicates.append(stripped_line)
-                imports_seen.add(stripped_line)
-
-        return {'undefined_names': undefined, 'duplicate_imports': duplicates, 'syntax_error': []}
 
     def merge_script(self, script_path: Path) -> str:
         """合并脚本"""
@@ -1746,37 +1701,15 @@ class AdvancedCodeMerger:
         final_code = "\n".join(result_lines)
 
         if getattr(self, "enable_verify", False):
-            problems = self._static_verify(final_code)
-            if any(problems.values()):
-                print("\n--- ⚠️  静态自检发现问题 ---")
-                if problems.get('syntax_error'):
-                    print(f"  致命语法错误: {problems['syntax_error'][0]}")
-                if problems.get('undefined_names'):
-                    print(f"  可能未定义的符号: {problems['undefined_names']}")
-                if problems.get('duplicate_imports'):
-                    print("  重复的导入语句 (将自动修复):")
-                    for line in sorted(list(set(problems['duplicate_imports']))):
-                        print(f"    {line}")
-                    
-                    # 自动修复：去除重复的导入
-                    lines = final_code.splitlines()
-                    seen_imports = set()
-                    cleaned_lines = []
-                    
-                    for line in lines:
-                        stripped = line.strip()
-                        if stripped.startswith(('import ', 'from ')):
-                            if stripped not in seen_imports:
-                                seen_imports.add(stripped)
-                                cleaned_lines.append(line)
-                            # 如果是重复的导入，跳过这一行
-                        else:
-                            cleaned_lines.append(line)
-                    
-                    final_code = "\n".join(cleaned_lines)
-                    print("  ✅ 已自动去除重复的导入语句")
-                    
-                print("---------------------------\n")
+            print("\n--- 🚀 Running post-merge static audit with ASTAuditor ---")
+            auditor = ASTAuditor()
+            if not auditor.audit(final_code, "merged_script.py"):
+                print("--- ⚠️  ASTAuditor found potential issues ---")
+                report = auditor.get_report()  # 获取格式化好的报告
+                print(report)
+                print("-------------------------------------------\n")
+            else:
+                print("--- ✅ ASTAuditor audit passed successfully ---")
 
         return final_code
 

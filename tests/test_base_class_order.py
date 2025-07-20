@@ -66,12 +66,14 @@ if __name__ == "__main__":
         merged_content = merged_file.read_text()
         
         # 验证基类在派生类之前定义
-        base_class_pos = merged_content.find("class BaseClass:")
-        derived_class_pos = merged_content.find("class DerivedClass(BaseClass):")
+        # 合并工具会重命名类，所以查找包含原始类名的模式
+        import re
+        base_class_match = re.search(r"class\s+\w*BaseClass\w*:", merged_content)
+        derived_class_match = re.search(r"class\s+\w*DerivedClass\w*\([^)]*BaseClass[^)]*\):", merged_content)
         
-        assert base_class_pos != -1, "BaseClass not found in merged file"
-        assert derived_class_pos != -1, "DerivedClass not found in merged file"
-        assert base_class_pos < derived_class_pos, "BaseClass must be defined before DerivedClass"
+        assert base_class_match, "BaseClass not found in merged file"
+        assert derived_class_match, "DerivedClass not found in merged file"
+        assert base_class_match.start() < derived_class_match.start(), "BaseClass must be defined before DerivedClass"
         
         # 验证合并后的文件可以执行
         exec_result = subprocess.run(
@@ -146,12 +148,16 @@ if __name__ == "__main__":
         merged_content = merged_file.read_text()
         
         # 验证顺序：Mixin1和Mixin2必须在BaseWithMixins之前
-        mixin1_pos = merged_content.find("class Mixin1:")
-        mixin2_pos = merged_content.find("class Mixin2:")
-        base_pos = merged_content.find("class BaseWithMixins(Mixin1, Mixin2):")
+        # 合并工具会重命名类，所以查找包含原始类名的模式
+        import re
+        mixin1_match = re.search(r"class\s+\w*Mixin1\w*:", merged_content)
+        mixin2_match = re.search(r"class\s+\w*Mixin2\w*:", merged_content)
+        base_match = re.search(r"class\s+\w*BaseWithMixins\w*\([^)]*Mixin1[^)]*Mixin2[^)]*\):", merged_content)
         
-        assert mixin1_pos < base_pos, "Mixin1 must be defined before BaseWithMixins"
-        assert mixin2_pos < base_pos, "Mixin2 must be defined before BaseWithMixins"
+        assert mixin1_match and base_match, "Mixin1 or BaseWithMixins not found"
+        assert mixin2_match and base_match, "Mixin2 or BaseWithMixins not found"
+        assert mixin1_match.start() < base_match.start(), "Mixin1 must be defined before BaseWithMixins"
+        assert mixin2_match.start() < base_match.start(), "Mixin2 must be defined before BaseWithMixins"
         
         # 验证执行
         exec_result = subprocess.run(
