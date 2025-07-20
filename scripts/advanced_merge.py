@@ -44,6 +44,7 @@ class Scope:
     module_path: Optional[Path] = None  # 仅用于模块作用域
     nonlocal_vars: Set[str] = field(default_factory=set)  # nonlocal声明的变量
     global_vars: Set[str] = field(default_factory=set)  # global声明的变量
+    used_symbols: Set[str] = field(default_factory=set)  # 在此作用域内使用的所有符号名称
 
 
 @dataclass
@@ -502,8 +503,21 @@ class ContextAwareVisitor(ast.NodeVisitor):
             symbol.dependencies.update(decorator_symbols)
             
         # 注册符号（无论是否嵌套）
+        # 如果作用域中已经有同名符号，我们需要记录这种冲突
+        if node.name in self.current_scope().symbols:
+            existing = self.current_scope().symbols[node.name]
+            # 如果现有符号是导入别名，应该被函数覆盖（Python语义）
+            # 但我们仍然需要在all_symbols中保留两者
+        
         self.current_scope().symbols[node.name] = symbol
-        self.all_symbols[qname] = symbol
+        
+        # 在all_symbols中，如果有重名，添加类型后缀以区分
+        if qname in self.all_symbols:
+            # 给新符号一个唯一的内部标识
+            unique_qname = f"{qname}#{symbol.symbol_type}"
+            self.all_symbols[unique_qname] = symbol
+        else:
+            self.all_symbols[qname] = symbol
         
         # 创建函数作用域
         func_scope = Scope(
@@ -565,6 +579,9 @@ class ContextAwareVisitor(ast.NodeVisitor):
             
         # 收集函数依赖
         symbol.dependencies.update(self.collect_function_dependencies(node))
+        
+        # 将函数作用域的used_symbols复制到符号的scope属性
+        symbol.scope = func_scope
         
         self.pop_scope()
         
@@ -799,19 +816,40 @@ class ContextAwareVisitor(ast.NodeVisitor):
                 
         return ""
     
+    def visit_Name(self, node: ast.Name):
+        """处理名称节点，收集使用的符号"""
+        if isinstance(node.ctx, ast.Load):
+            # 记录在当前作用域中使用的符号
+            self.current_scope().used_symbols.add(node.id)
+    
     def visit_Try(self, node: ast.Try):
         """正确管理 try...except 块的访问状态"""
         # 保存进入此节点前的状态
         original_state = self.in_try_import_error
         
         if self._is_try_import_error(node):
+            # 访问 try 块中的语句，设置运行时导入标志
             self.in_try_import_error = True
-
-        # 递归访问所有子节点
-        self.generic_visit(node)
-
-        # 离开此节点时，恢复原始状态，这对于处理嵌套至关重要
-        self.in_try_import_error = original_state
+            for stmt in node.body:
+                self.visit(stmt)
+            
+            # 访问 except 块中的语句
+            for handler in node.handlers:
+                for stmt in handler.body:
+                    self.visit(stmt)
+            
+            # 恢复原始状态
+            self.in_try_import_error = original_state
+            
+            # 访问 else 和 finally 块（如果有）
+            for stmt in node.orelse:
+                self.visit(stmt)
+            for stmt in node.finalbody:
+                self.visit(stmt)
+        else:
+            # 不是 try...except ImportError，正常访问
+            self.generic_visit(node)
+        
         return node
     
     def analyze_dependencies(self, node: ast.AST, parent_scope: Optional[Scope] = None) -> Set[Symbol]:
@@ -1015,31 +1053,39 @@ class AdvancedCodeMerger:
     def _collect_runtime_import_dependencies(self, needed_symbols: Set[Symbol]) -> Set[Symbol]:
         """收集实际使用的运行时导入依赖（按需）
         
-        只有当 needed_symbols 中的符号依赖于运行时导入时，
-        才会包含相应的 try...except ImportError 块中的所有可能依赖
+        使用更精确的 used_symbols 集合来判断函数是否依赖运行时导入
         """
         runtime_deps = set()
         
-        # 检查是否有符号使用了运行时导入
-        has_runtime_import = False
+        # 步骤3优化：构建运行时别名索引以提高查找性能
+        runtime_alias_index = {}  # name -> Symbol 的映射
+        for symbol in self.visitor.all_symbols.values():
+            if symbol.is_runtime_import and symbol.symbol_type == 'import_alias':
+                runtime_alias_index[symbol.name] = symbol
+        
+        # 如果没有运行时导入，直接返回
+        if not runtime_alias_index:
+            return runtime_deps
+        
+        # 检查每个需要的符号是否使用了运行时导入
         for symbol in needed_symbols:
             # 检查符号的直接依赖
             for dep in symbol.dependencies:
                 if dep.is_runtime_import:
-                    has_runtime_import = True
-                    runtime_deps.add(dep)  # 直接添加运行时导入符号
+                    runtime_deps.add(dep)
             
-            # 检查符号的定义节点中是否引用了运行时导入
-            if symbol.def_node and hasattr(symbol, 'symbol_type'):
-                # 对于函数，检查其内部是否使用了运行时导入的符号
-                if symbol.symbol_type in ('function', 'class'):
-                    # 这些符号的定义会在后续被分析
-                    has_runtime_import = True
+            # 步骤2改进：对于函数和类，使用 used_symbols 集合判断
+            if symbol.symbol_type in ('function', 'class') and symbol.scope:
+                # 检查该符号作用域中使用的所有名称
+                for used_name in symbol.scope.used_symbols:
+                    # O(1) 查找而不是 O(N) 遍历
+                    if used_name in runtime_alias_index:
+                        runtime_deps.add(runtime_alias_index[used_name])
         
-        if not has_runtime_import:
+        if not runtime_deps:
             return runtime_deps
         
-        # 如果有运行时导入，需要分析所有 try...except ImportError 块
+        # 收集完整的 try...except ImportError 块
         for module_symbol in self.visitor.all_symbols.values():
             if module_symbol.symbol_type == 'module' and module_symbol.init_statements:
                 for stmt in module_symbol.init_statements:
@@ -1051,12 +1097,11 @@ class AdvancedCodeMerger:
                                 for alias in try_stmt.names:
                                     # 计算实际的别名
                                     actual_alias = alias.asname or alias.name.split('.')[0]
-                                    # 查找对应的符号
-                                    for sym in self.visitor.all_symbols.values():
-                                        if (sym.symbol_type == 'import_alias' and 
-                                            sym.is_runtime_import and
-                                            sym.scope.module_path == module_symbol.scope.module_path and
-                                            sym.name == actual_alias):  # 检查符号名称是否匹配
+                                    # 使用索引进行 O(1) 查找
+                                    if actual_alias in runtime_alias_index:
+                                        sym = runtime_alias_index[actual_alias]
+                                        # 验证符号来自同一模块
+                                        if sym.scope.module_path == module_symbol.scope.module_path:
                                             runtime_deps.add(sym)
                             elif isinstance(try_stmt, ast.ImportFrom):
                                 # 获取导入的符号
@@ -1085,12 +1130,11 @@ class AdvancedCodeMerger:
                                     for alias in except_stmt.names:
                                         # 计算实际的别名
                                         actual_alias = alias.asname or alias.name.split('.')[0]
-                                        # 查找对应的符号
-                                        for sym in self.visitor.all_symbols.values():
-                                            if (sym.symbol_type == 'import_alias' and 
-                                                sym.is_runtime_import and
-                                                sym.scope.module_path == module_symbol.scope.module_path and
-                                                sym.name == actual_alias):  # 检查符号名称是否匹配
+                                        # 使用索引进行 O(1) 查找
+                                        if actual_alias in runtime_alias_index:
+                                            sym = runtime_alias_index[actual_alias]
+                                            # 验证符号来自同一模块
+                                            if sym.scope.module_path == module_symbol.scope.module_path:
                                                 runtime_deps.add(sym)
                                 elif isinstance(except_stmt, ast.ImportFrom):
                                     module_name = except_stmt.module or ''
@@ -1230,20 +1274,51 @@ class AdvancedCodeMerger:
         """生成名称映射"""
         # 统计名称冲突（包括导入别名）
         name_counts = defaultdict(int)
-        for symbol in symbols:
+        
+        # 收集所有符号的名称，包括运行时导入
+        all_symbols_to_consider = set(symbols)
+        
+        # 添加所有符号，包括那些有类型后缀的
+        for qname, symbol in self.visitor.all_symbols.items():
+            # 对于带类型后缀的符号，提取原始符号
+            if '#' not in qname:  # 只处理原始qname
+                all_symbols_to_consider.add(symbol)
+            
+        # 统计所有符号的名称
+        for symbol in all_symbols_to_consider:
             name_counts[symbol.name] += 1
                 
         # 生成映射
-        for symbol in symbols:
+        for symbol in all_symbols_to_consider:
             if name_counts[symbol.name] > 1:
                 # 有冲突，需要重命名
                 module_key = self.visitor.get_module_qname(symbol.scope.module_path)
                 module_key = module_key.replace('.', '_').replace('__init__', 'pkg')
-                new_name = f"{module_key}_{symbol.name}"
+                
+                # 对于运行时导入，添加特殊后缀以区分
+                if symbol.is_runtime_import:
+                    new_name = f"{symbol.name}__rt"
+                else:
+                    # 对于函数，使用模块前缀+类型
+                    if symbol.symbol_type == 'function':
+                        new_name = f"{module_key}_{symbol.name}"
+                    else:
+                        new_name = f"{module_key}_{symbol.name}"
+                    
                 self.name_mappings[symbol.qname] = new_name
+                
+                # 同时为带类型后缀的版本添加映射
+                type_qname = f"{symbol.qname}#{symbol.symbol_type}"
+                if type_qname in self.visitor.all_symbols:
+                    self.name_mappings[type_qname] = new_name
             else:
                 # 无冲突，保持原名
                 self.name_mappings[symbol.qname] = symbol.name
+                
+                # 同时为带类型后缀的版本添加映射
+                type_qname = f"{symbol.qname}#{symbol.symbol_type}"
+                if type_qname in self.visitor.all_symbols:
+                    self.name_mappings[type_qname] = symbol.name
                 
     def _write_symbol(self, symbol: Symbol, transformer: 'AdvancedNodeTransformer', result_lines: List[str]):
         """解决 #1: 写入符号时进行冲突检测"""
@@ -1722,17 +1797,18 @@ class AdvancedNodeTransformer(ast.NodeTransformer):
         if isinstance(node.ctx, ast.Load):
             symbol = self.resolve_name_to_symbol(node.id)
             
-            # 关键：如果是一个运行时符号，我们只对别名本身进行重命名，然后立即返回，
-            # 阻止任何进一步的解析和内联。
-            if symbol and symbol.is_runtime_import:
-                if symbol.qname in self.name_mappings:
+            if symbol:
+                # 首先检查是否有类型后缀的映射
+                type_qname = f"{symbol.qname}#{symbol.symbol_type}"
+                if type_qname in self.name_mappings:
+                    node.id = self.name_mappings[type_qname]
+                elif symbol.qname in self.name_mappings:
                     node.id = self.name_mappings[symbol.qname]
-                return node  # 立即返回，保持别名引用
-            
-            # 对普通符号的现有处理逻辑
-            qname = self.find_symbol_qname(node.id)
-            if qname and qname in self.name_mappings:
-                node.id = self.name_mappings[qname]
+                    
+                # 如果是运行时导入，立即返回
+                if symbol.is_runtime_import:
+                    return node
+                    
         return node
         
     def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
@@ -1756,7 +1832,39 @@ class AdvancedNodeTransformer(ast.NodeTransformer):
         
         # 获取根名称
         base_name = current.id
-        base_symbol = self.resolve_name_to_symbol(base_name)
+        
+        # 对于属性访问，优先查找导入符号
+        base_symbol = None
+        
+        # 首先尝试查找导入别名符号
+        current_module = self.get_current_module_path()
+        if current_module:
+            module_qname = self.visitor.get_module_qname(current_module)
+            
+            # 查找所有可能的符号
+            possible_symbols = []
+            
+            # 1. 查找模块级的导入别名
+            import_qname = f"{module_qname}.{base_name}"
+            if import_qname in self.all_symbols:
+                sym = self.all_symbols[import_qname]
+                if sym.symbol_type == 'import_alias':
+                    possible_symbols.append(sym)
+            
+            # 2. 查找带类型后缀的版本
+            import_type_qname = f"{import_qname}#import_alias"
+            if import_type_qname in self.all_symbols:
+                possible_symbols.append(self.all_symbols[import_type_qname])
+            
+            # 选择导入符号（如果有）
+            for sym in possible_symbols:
+                if sym.symbol_type == 'import_alias':
+                    base_symbol = sym
+                    break
+        
+        # 如果没找到导入符号，使用默认的解析方法
+        if not base_symbol:
+            base_symbol = self.resolve_name_to_symbol(base_name)
         
         if not base_symbol:
             # 基名无法解析，保持原样
@@ -1801,6 +1909,18 @@ class AdvancedNodeTransformer(ast.NodeTransformer):
         target_symbol = None
         
         if base_symbol.symbol_type == 'import_alias':
+            # 如果是运行时导入，直接使用映射的名称
+            if base_symbol.is_runtime_import:
+                # 检查映射
+                if base_symbol.qname in self.name_mappings:
+                    current.id = self.name_mappings[base_symbol.qname]
+                else:
+                    # 也检查带类型后缀的版本
+                    type_qname = f"{base_symbol.qname}#import_alias"
+                    if type_qname in self.name_mappings:
+                        current.id = self.name_mappings[type_qname]
+                return self.generic_visit(node)
+            
             # 如果导入别名本身在映射中（例如模块别名），使用映射后的名称
             if base_symbol.qname in self.name_mappings:
                 current.id = self.name_mappings[base_symbol.qname]
@@ -1863,6 +1983,51 @@ class AdvancedNodeTransformer(ast.NodeTransformer):
         # 暂时不处理字符串类型注解
         return node
         
+    def visit_Import(self, node: ast.Import):
+        """处理 import 语句，确保别名正确重命名"""
+        for alias in node.names:
+            # 计算实际的别名
+            actual_alias = alias.asname if alias.asname else alias.name
+            
+            # 查找是否需要重命名
+            # 首先查找对应的符号
+            symbol = self.resolve_name_to_symbol(actual_alias)
+            if symbol and symbol.qname in self.name_mappings:
+                # 需要重命名
+                new_name = self.name_mappings[symbol.qname]
+                if alias.asname:
+                    # 如果原来有别名，更新别名
+                    alias.asname = new_name
+                else:
+                    # 如果原来没有别名，添加别名
+                    alias.asname = new_name
+        
+        return node
+    
+    def visit_ImportFrom(self, node: ast.ImportFrom):
+        """处理 from ... import ... 语句，确保别名正确重命名"""
+        # 如果是相对导入，保持原样
+        if node.level > 0:
+            return node
+            
+        for alias in node.names:
+            # 计算实际的别名
+            actual_alias = alias.asname if alias.asname else alias.name
+            
+            # 查找是否需要重命名
+            symbol = self.resolve_name_to_symbol(actual_alias)
+            if symbol and symbol.qname in self.name_mappings:
+                # 需要重命名
+                new_name = self.name_mappings[symbol.qname]
+                if alias.asname:
+                    # 如果原来有别名，更新别名
+                    alias.asname = new_name
+                else:
+                    # 如果原来没有别名，添加别名
+                    alias.asname = new_name
+        
+        return node
+    
     def visit_Try(self, node: ast.Try):
         """处理 try...except 语句
         
