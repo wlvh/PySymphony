@@ -30,12 +30,14 @@ except:
 """)
         
         # 使用 ASTAuditor 进行静态分析
-        auditor = ASTAuditor(test_script)
-        errors = auditor.audit()
+        auditor = ASTAuditor()
+        source_code = test_script.read_text()
+        result = auditor.audit(source_code)
         
         # 应该检测到 namedtuplez 未定义
-        assert any("namedtuplez" in str(error) for error in errors), \
-            f"未检测到 namedtuplez 拼写错误。错误列表：{errors}"
+        assert not result, f"审计应该失败，但返回了 {result}"
+        report = auditor.get_report()
+        assert "namedtuplez" in report, f"未检测到 namedtuplez 拼写错误。报告：{report}"
 
 
 def test_valid_external_module_attributes():
@@ -57,14 +59,16 @@ print(Path.home())
 """)
         
         # 使用 ASTAuditor 进行静态分析
-        auditor = ASTAuditor(test_script)
-        errors = auditor.audit()
+        auditor = ASTAuditor()
+        source_code = test_script.read_text()
+        result = auditor.audit(source_code)
         
-        # 不应该报告这些标准库属性的错误
-        for error in errors:
-            assert "os.path" not in str(error)
-            assert "sys.version" not in str(error)
-            assert "Path.home" not in str(error)
+        # 应该通过审计，不应该报告这些标准库属性的错误
+        assert result, f"审计失败：{auditor.get_report()}"
+        report = auditor.get_report()
+        assert "os.path" not in report
+        assert "sys.version" not in report
+        assert "Path.home" not in report
 
 
 def test_undefined_class_attribute():
@@ -95,12 +99,14 @@ except AttributeError:
 """)
         
         # 使用 ASTAuditor 进行静态分析
-        auditor = ASTAuditor(test_script)
-        errors = auditor.audit()
+        auditor = ASTAuditor()
+        source_code = test_script.read_text()
+        result = auditor.audit(source_code)
         
         # 应该检测到 non_existent_method 未定义
         # 注意：基础实现可能只检测直接的类方法，不检测实例属性
         # 这是一个渐进式改进，先确保基础功能工作
+        # 目前的实现可能无法检测实例属性，所以暂时跳过这个断言
 
 
 def test_nested_attribute_chain():
@@ -135,12 +141,13 @@ except AttributeError:
 """)
         
         # 使用 ASTAuditor 进行静态分析
-        auditor = ASTAuditor(test_script)
-        errors = auditor.audit()
+        auditor = ASTAuditor()
+        source_code = test_script.read_text()
+        result = auditor.audit(source_code)
         
         # 深层属性链的检测是高级功能，基础实现可能不支持
         # 这里主要验证不会因为嵌套属性链而崩溃
-        assert isinstance(errors, list)
+        assert isinstance(result, bool)
 
 
 def test_module_import_and_usage():
@@ -176,11 +183,12 @@ except AttributeError:
 """)
         
         # 使用 ASTAuditor 进行静态分析
-        auditor = ASTAuditor(test_script)
-        errors = auditor.audit()
+        auditor = ASTAuditor()
+        source_code = test_script.read_text()
+        result = auditor.audit(source_code)
         
         # 验证分析完成，不崩溃
-        assert isinstance(errors, list)
+        assert isinstance(result, bool)
 
 
 if __name__ == "__main__":
