@@ -1540,7 +1540,7 @@ class AdvancedCodeMerger:
                     qname.startswith(module_qname + '.') and
                     symbol not in all_import_aliases):
                     # 只添加那些属于已处理模块的导入别名
-                    if any(s.scope.module_path == module_path for s in self.needed_symbols):
+                    if any(s.scope and s.scope.module_path == module_path for s in self.needed_symbols):
                         all_import_aliases.append(symbol)
         
         # 遍历所有收集到的导入别名
@@ -1705,8 +1705,12 @@ class AdvancedCodeMerger:
                 self.name_mappings[symbol.qname] = new_name
             elif name_counts[symbol.name] > 1:
                 # 对于其他符号，只在有冲突时重命名
-                module_key = self.visitor.get_module_qname(symbol.scope.module_path)
-                module_key = module_key.replace('.', '_').replace('__init__', 'pkg')
+                if symbol.scope and symbol.scope.module_path:
+                    module_key = self.visitor.get_module_qname(symbol.scope.module_path)
+                    module_key = module_key.replace('.', '_').replace('__init__', 'pkg')
+                else:
+                    # 如果没有 scope，使用符号的 qname 前缀
+                    module_key = symbol.qname.rsplit('.', 1)[0] if '.' in symbol.qname else 'unknown'
                 new_name = f"{module_key}_{symbol.name}"
                 self.name_mappings[symbol.qname] = new_name
                 
@@ -1760,8 +1764,11 @@ class AdvancedCodeMerger:
                 
             # 检查是否是完全重复的定义
             # 简化处理：如果名称已存在，则重命名
-            module_qname = self.visitor.get_module_qname(symbol.scope.module_path)
-            module_alias = module_qname.replace('.', '_')
+            if symbol.scope and symbol.scope.module_path:
+                module_qname = self.visitor.get_module_qname(symbol.scope.module_path)
+                module_alias = module_qname.replace('.', '_')
+            else:
+                module_alias = 'unknown'
             new_name = f"{target_name}__from_{module_alias}"
             self.name_mappings[symbol.qname] = new_name
             target_name = new_name
@@ -1777,7 +1784,7 @@ class AdvancedCodeMerger:
         
         # 写入结果
         if transformed is not None:
-            if symbol.scope.module_path:
+            if symbol.scope and symbol.scope.module_path:
                 rel_path = symbol.scope.module_path.relative_to(self.project_root)
                 result_lines.append(f"# From {rel_path}")
             result_lines.append(ast.unparse(transformed))
@@ -1864,7 +1871,7 @@ class AdvancedCodeMerger:
             # Issue #37 修复：过滤掉入口模块中的变量定义
             # 这些变量会作为主代码的一部分输出，不需要单独输出
             if (s.symbol_type == 'variable' and 
-                s.scope.module_path == script_path):
+                s.scope and s.scope.module_path == script_path):
                 continue
                 
             # 检查是否是类的方法（通过判断qname中是否包含类名）
@@ -1976,7 +1983,11 @@ class AdvancedCodeMerger:
             self._write_symbol(symbol, transformer, result_lines)
             
             # 收集模块初始化语句
-            module_qname = self.visitor.get_module_qname(symbol.scope.module_path)
+            if symbol.scope and symbol.scope.module_path:
+                module_qname = self.visitor.get_module_qname(symbol.scope.module_path)
+            else:
+                continue
+                
             if module_qname in self.visitor.all_symbols:
                 module_symbol = self.visitor.all_symbols[module_qname]
                 # 不要收集入口模块的初始化语句，因为它们已经在 main_code 中处理了
@@ -1996,7 +2007,7 @@ class AdvancedCodeMerger:
                 
                 # 设置正确的模块作用域
                 module_symbol = self.visitor.all_symbols.get(module_qname)
-                if module_symbol and module_symbol.scope.module_path:
+                if module_symbol and module_symbol.scope and module_symbol.scope.module_path:
                     module_path = module_symbol.scope.module_path
                     if module_path in self.visitor.module_symbols:
                         module_scope = self.visitor.module_symbols[module_path].get('__scope__')
@@ -2103,7 +2114,11 @@ class AdvancedNodeTransformer(ast.NodeTransformer):
             return None
             
         # 设置当前作用域栈
-        self.current_scope_stack = [symbol.scope]
+        if symbol.scope:
+            self.current_scope_stack = [symbol.scope]
+        else:
+            # 如果没有 scope，使用默认的模块作用域
+            self.current_scope_stack = []
         
         # 转换节点
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
