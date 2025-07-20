@@ -215,8 +215,46 @@ class ReferenceValidator(ast.NodeVisitor):
                     
     def visit_Attribute(self, node: ast.Attribute):
         """访问属性引用"""
-        # 只检查基础对象，不检查属性名
+        # B3 修复：实现属性引用验证
+        # 首先检查基础对象
         self.visit(node.value)
+        
+        # 递归解析属性链，获取根符号
+        root_obj = node.value
+        attr_chain = [node.attr]
+        
+        while isinstance(root_obj, ast.Attribute):
+            attr_chain.insert(0, root_obj.attr)
+            root_obj = root_obj.value
+            
+        # 如果根对象是名称，尝试解析它
+        if isinstance(root_obj, ast.Name):
+            root_symbol = self.find_symbol(root_obj.id)
+            
+            if root_symbol:
+                # 检查是否是外部模块（如 os, sys 等）
+                # 对于外部模块，我们不检查属性
+                if root_symbol.type == 'import' and root_obj.id in ['os', 'sys', 'json', 're', 
+                                                                           'math', 'datetime', 'pathlib',
+                                                                           'collections', 'itertools']:
+                    return
+                    
+                # 对于本地符号，检查第一层属性是否存在
+                # 注意：这里只做基础检查，不做深层次的属性验证
+                first_attr = attr_chain[0]
+                
+                # 如果是类符号，检查类的成员
+                if root_symbol.type == 'class':
+                    # 查找类中定义的方法和属性
+                    class_members = set()
+                    for child_scope in self.current_scope.children:
+                        if child_scope.parent == root_symbol.scope:
+                            class_members.update(child_scope.symbols.keys())
+                    
+                    # 如果属性不在类成员中，记录未定义引用
+                    if first_attr not in class_members and first_attr not in ['__init__', '__call__', 
+                                                                               '__str__', '__repr__']:
+                        self.undefined_names.append((f"{root_obj.id}.{first_attr}", node.lineno))
         
     def visit_FunctionDef(self, node: ast.FunctionDef):
         """访问函数定义"""
