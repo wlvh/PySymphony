@@ -1257,6 +1257,121 @@ class AdvancedCodeMerger:
         """检查两个 AST 节点是否相等"""
         return ast.dump(node1) == ast.dump(node2)
     
+    def _collect_and_reinject_imports(self, output_symbols: Set[Symbol]) -> List[str]:
+        """收集并重新注入必要的导入别名
+        
+        返回需要添加的导入语句列表
+        """
+        imports_to_reinject = []
+        import_set = set()  # 用于去重
+        processed_symbols = set()  # 跟踪已处理的符号
+        
+        # 遍历所有需要的符号，查找 import_alias 类型
+        for symbol in self.needed_symbols:
+            if symbol.symbol_type == 'import_alias' and symbol.qname not in processed_symbols:
+                processed_symbols.add(symbol.qname)
+                
+                # 对于 import_alias，我们需要检查它依赖的符号是否被内联
+                # 如果依赖的符号没有被内联，就需要重新注入导入语句
+                
+                # 检查符号是否需要重新注入
+                should_reinject = False
+                
+                # 1. 如果符号在 name_mappings 中且被重命名了，可能需要重新注入
+                if symbol.qname in self.name_mappings and self.name_mappings[symbol.qname] != symbol.name:
+                    # 如果是外部导入的别名被重命名了（如 json -> json__module），需要重新注入
+                    if not symbol.dependencies or (symbol.dependencies and 
+                                                  all(d.symbol_type == 'module' for d in symbol.dependencies)):
+                        should_reinject = True
+                
+                # 2. 如果依赖的符号没有被内联，也需要重新注入
+                if not should_reinject and symbol.dependencies:
+                    for dep in symbol.dependencies:
+                        # 如果依赖的符号不在输出符号集合中，需要重新注入导入
+                        if dep not in output_symbols and dep.symbol_type in ('function', 'class', 'variable'):
+                            should_reinject = True
+                            break
+                
+                if not should_reinject:
+                    continue
+                
+                # 获取导入节点信息
+                node = symbol.def_node
+                
+                if isinstance(node, ast.Import):
+                    # 处理 import xxx as yyy 格式
+                    for alias in node.names:
+                        module_name = alias.name
+                        alias_name = alias.asname if alias.asname else alias.name
+                        
+                        # 检查当前别名对应的符号
+                        if symbol.name != alias_name:
+                            continue
+                        
+                        # 检查是否需要重命名
+                        new_name = None
+                        if symbol.qname in self.name_mappings:
+                            new_name = self.name_mappings[symbol.qname]
+                        else:
+                            # 也检查带类型后缀的版本
+                            type_qname = f"{symbol.qname}#import_alias"
+                            if type_qname in self.name_mappings:
+                                new_name = self.name_mappings[type_qname]
+                        
+                        # 生成导入语句
+                        if new_name and new_name != alias_name:
+                            import_stmt = f"import {module_name} as {new_name}"
+                        elif alias.asname:
+                            import_stmt = f"import {module_name} as {alias_name}"
+                        else:
+                            import_stmt = f"import {module_name}"
+                            
+                        if import_stmt not in import_set:
+                            import_set.add(import_stmt)
+                            imports_to_reinject.append(import_stmt)
+                            
+                elif isinstance(node, ast.ImportFrom):
+                    # 处理 from xxx import yyy as zzz 格式
+                    module = node.module if node.module else ""
+                    level = node.level
+                    
+                    # 跳过相对导入
+                    if level > 0:
+                        continue
+                        
+                    for alias in node.names:
+                        name = alias.name
+                        alias_name = alias.asname if alias.asname else alias.name
+                        
+                        # 检查当前别名对应的符号
+                        if symbol.name != alias_name:
+                            continue
+                        
+                        # 检查是否需要重命名
+                        new_name = None
+                        if symbol.qname in self.name_mappings:
+                            new_name = self.name_mappings[symbol.qname]
+                        else:
+                            # 也检查带类型后缀的版本
+                            type_qname = f"{symbol.qname}#import_alias"
+                            if type_qname in self.name_mappings:
+                                new_name = self.name_mappings[type_qname]
+                        
+                        # 生成导入语句
+                        if new_name and new_name != alias_name:
+                            import_stmt = f"from {module} import {name} as {new_name}"
+                        elif alias.asname:
+                            import_stmt = f"from {module} import {name} as {alias_name}"
+                        else:
+                            import_stmt = f"from {module} import {name}"
+                            
+                        if import_stmt not in import_set:
+                            import_set.add(import_stmt)
+                            imports_to_reinject.append(import_stmt)
+        
+        # 排序以保证输出的确定性
+        return sorted(imports_to_reinject)
+    
     def _is_dunder_main(self, node: ast.AST) -> bool:
         """检查是否是 if __name__ == '__main__' 块"""
         if isinstance(node, ast.If):
@@ -1274,19 +1389,24 @@ class AdvancedCodeMerger:
         """生成名称映射"""
         # 统计名称冲突（包括导入别名）
         name_counts = defaultdict(int)
+        name_to_symbols = defaultdict(list)  # name -> list of symbols
         
         # 收集所有符号的名称，包括运行时导入
         all_symbols_to_consider = set(symbols)
         
         # 添加所有符号，包括那些有类型后缀的
+        # 但是导入别名需要特殊处理
         for qname, symbol in self.visitor.all_symbols.items():
             # 对于带类型后缀的符号，提取原始符号
             if '#' not in qname:  # 只处理原始qname
-                all_symbols_to_consider.add(symbol)
+                # 对于需要的导入别名，也要加入考虑
+                if symbol in self.needed_symbols or symbol.symbol_type != 'import_alias':
+                    all_symbols_to_consider.add(symbol)
             
         # 统计所有符号的名称
         for symbol in all_symbols_to_consider:
             name_counts[symbol.name] += 1
+            name_to_symbols[symbol.name].append(symbol)
                 
         # 生成映射
         for symbol in all_symbols_to_consider:
@@ -1295,9 +1415,17 @@ class AdvancedCodeMerger:
                 module_key = self.visitor.get_module_qname(symbol.scope.module_path)
                 module_key = module_key.replace('.', '_').replace('__init__', 'pkg')
                 
+                # 别名一致性保护：检查是否同时有 import_alias 和其他类型
+                symbols_with_same_name = name_to_symbols[symbol.name]
+                has_import_alias = any(s.symbol_type == 'import_alias' for s in symbols_with_same_name)
+                has_other_types = any(s.symbol_type != 'import_alias' for s in symbols_with_same_name)
+                
                 # 对于运行时导入，添加特殊后缀以区分
                 if symbol.is_runtime_import:
                     new_name = f"{symbol.name}__rt"
+                elif has_import_alias and has_other_types and symbol.symbol_type == 'import_alias':
+                    # 如果同时存在 import_alias 和其他类型的符号，优先重命名 import_alias
+                    new_name = f"{symbol.name}__module"
                 else:
                     # 对于函数，使用模块前缀+类型
                     if symbol.symbol_type == 'function':
@@ -1498,6 +1626,13 @@ class AdvancedCodeMerger:
         if self.visitor.external_imports:
             processed_imports = self._process_imports(self.visitor.external_imports)
             result_lines.extend(processed_imports)
+            result_lines.append("")
+            
+        # 收集并重新注入必要的导入别名
+        reinjected_imports = self._collect_and_reinject_imports(output_symbols)
+        if reinjected_imports:
+            result_lines.append("# Re-injected import aliases for unresolved dependencies")
+            result_lines.extend(reinjected_imports)
             result_lines.append("")
             
         # 合并的符号定义
@@ -1798,6 +1933,15 @@ class AdvancedNodeTransformer(ast.NodeTransformer):
             symbol = self.resolve_name_to_symbol(node.id)
             
             if symbol:
+                # 如果是导入别名，检查它的依赖是否已经被内联
+                if symbol.symbol_type == 'import_alias' and symbol.dependencies:
+                    # 获取依赖的符号
+                    dep = next(iter(symbol.dependencies))
+                    # 如果依赖有映射（说明被内联了），使用依赖的映射名称
+                    if dep.qname in self.name_mappings:
+                        node.id = self.name_mappings[dep.qname]
+                        return node
+                
                 # 首先检查是否有类型后缀的映射
                 type_qname = f"{symbol.qname}#{symbol.symbol_type}"
                 if type_qname in self.name_mappings:
