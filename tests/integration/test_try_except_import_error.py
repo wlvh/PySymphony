@@ -577,6 +577,141 @@ if __name__ == "__main__":
     assert "Result:" in result.stdout
 
 
+def test_runtime_alias_conflict_and_rename(tmp_path):
+    """测试运行时导入别名冲突时的重命名处理
+    
+    这是一个金丝雀测试，用于验证：
+    1. [结构正确性] import语句中的别名被正确重命名
+    2. [功能正确性] 在缺少可选包时代码能成功执行
+    3. [运行时正确性] 重命名后的别名存在，原始别名不存在
+    """
+    # 创建测试文件
+    main_py = tmp_path / "main.py"
+    main_py.write_text("""
+try:
+    import orjson as json  # 运行时导入，使用别名
+except ImportError:
+    import json  # 回退导入
+
+# 主代码流中也定义了同名符号，强制触发别名重命名
+def json():
+    return "local json function"
+
+def use_json_module():
+    # 使用运行时导入的模块
+    data = {"key": "value"}
+    return json.dumps(data)  # 这里的json应该是模块，不是函数
+
+def use_json_function():
+    # 使用本地函数
+    return json()  # 这里的json应该是函数
+
+if __name__ == "__main__":
+    print("Testing json module:", use_json_module())
+    print("Testing json function:", use_json_function())
+""")
+    
+    # 运行合并脚本
+    merge_script = Path(__file__).parent.parent.parent / "scripts" / "advanced_merge.py"
+    result = subprocess.run(
+        [sys.executable, str(merge_script), str(main_py), str(tmp_path)],
+        capture_output=True,
+        text=True
+    )
+    
+    # 验证合并成功
+    assert result.returncode == 0, f"Merge failed: {result.stderr}"
+    
+    merged_file = tmp_path / "main_advanced_merged.py"
+    assert merged_file.exists()
+    
+    merged_content = merged_file.read_text()
+    
+    # 1. [结构正确性] 使用AST解析验证import语句被正确重命名
+    merged_ast = ast.parse(merged_content)
+    
+    # 查找try...except块中的import语句
+    import_aliases = []
+    for node in ast.walk(merged_ast):
+        if isinstance(node, ast.Try):
+            for stmt in node.body:
+                if isinstance(stmt, ast.Import):
+                    for alias in stmt.names:
+                        import_aliases.append((alias.name, alias.asname))
+            for handler in node.handlers:
+                for stmt in handler.body:
+                    if isinstance(stmt, ast.Import):
+                        for alias in stmt.names:
+                            import_aliases.append((alias.name, alias.asname))
+    
+    # 验证别名被重命名（应该有一个重命名的别名）
+    renamed_aliases = [(name, asname) for name, asname in import_aliases if asname and asname != name.split('.')[-1]]
+    assert len(renamed_aliases) > 0, "运行时导入的别名应该被重命名"
+    
+    # 获取重命名后的别名
+    json_alias = None
+    for name, asname in import_aliases:
+        if 'json' in name and asname:
+            json_alias = asname
+            break
+    
+    assert json_alias is not None, "应该找到json的重命名别名"
+    assert json_alias != 'json', f"json别名应该被重命名，而不是保持为'json'，实际为: {json_alias}"
+    
+    # 2. [功能正确性] 在缺少orjson的环境中执行合并后的代码
+    # 执行合并后的代码
+    result = subprocess.run(
+        [sys.executable, str(merged_file)],
+        capture_output=True,
+        text=True,
+        cwd=str(tmp_path)
+    )
+    
+    # 验证执行成功
+    assert result.returncode == 0, f"执行失败: {result.stderr}"
+    assert "Testing json module:" in result.stdout
+    assert "Testing json function:" in result.stdout
+    assert "local json function" in result.stdout
+    
+    # 3. [运行时正确性] 通过执行代码片段检查运行时环境
+    check_script = f'''
+import sys
+sys.path.insert(0, "{tmp_path}")
+import main_advanced_merged
+
+# 检查全局命名空间
+globals_list = list(main_advanced_merged.__dict__.keys())
+print("HAS_JSON_FUNCTION:", "json" in globals_list and callable(main_advanced_merged.__dict__.get("json")))
+print("HAS_JSON_ALIAS:", "{json_alias}" in globals_list)
+
+# 检查是否可以调用
+try:
+    result = main_advanced_merged.json()
+    print("FUNCTION_RESULT:", result)
+except:
+    print("FUNCTION_RESULT: ERROR")
+
+# 检查json模块别名
+if "{json_alias}" in main_advanced_merged.__dict__:
+    alias_obj = main_advanced_merged.__dict__["{json_alias}"]
+    print("ALIAS_IS_MODULE:", hasattr(alias_obj, "dumps"))
+else:
+    print("ALIAS_IS_MODULE: FALSE")
+'''
+    
+    check_result = subprocess.run(
+        [sys.executable, "-c", check_script],
+        capture_output=True,
+        text=True,
+        cwd=str(tmp_path)
+    )
+    
+    assert "HAS_JSON_FUNCTION: True" in check_result.stdout
+    assert f"HAS_JSON_ALIAS: True" in check_result.stdout
+    assert "FUNCTION_RESULT: local json function" in check_result.stdout
+    assert "ALIAS_IS_MODULE: True" in check_result.stdout
+
+
 if __name__ == "__main__":
     # 如果直接运行此文件，使用 pytest
     pytest.main([__file__, "-v"])
