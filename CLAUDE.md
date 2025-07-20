@@ -50,7 +50,14 @@ PySymphony/
 │   │       ├── order_test.py     # Test cases for dependency ordering
 │   │       └── complex_deps.py   # Complex multi-layer dependency tests
 │   ├── test_regression.py   # Regression tests
-│   └── test_advanced_merger_fixes.py  # Tests for advanced merger fixes
+│   ├── test_advanced_merger_fixes.py  # Tests for advanced merger fixes
+│   ├── test_perf_hash_lookup.py  # Performance tests for B1 fix (O(N²) optimization)
+│   ├── test_runtime_alias_conflict.py  # Tests for B2 fix (import alias conflicts)
+│   ├── test_attr_reference_validation.py  # Tests for B3 fix (attribute validation)
+│   └── test_class_method_order_multi_inherit.py  # Tests for B4 fix (class-method ordering)
+├── .github/                 # GitHub Actions CI/CD
+│   └── workflows/
+│       └── test.yml         # Test suite workflow with perf-smoke job
 ├── conftest.py              # Pytest configuration with AST auditor integration
 ├── pytest.ini               # Pytest settings
 ├── requirements-dev.txt     # Development dependencies
@@ -63,17 +70,22 @@ PySymphony/
 - **`pysymphony/auditor/auditor.py`**: Industrial-grade multi-stage AST analysis system:
   - **SymbolTableBuilder**: Builds comprehensive symbol tables with scope tracking
   - **ReferenceValidator**: Validates all symbol references with LEGB scope resolution
+    - **B3 Enhancement**: Now validates attribute existence on objects (e.g., detects `obj.non_existent_method()`)
   - **PatternChecker**: Detects specific patterns (e.g., multiple main blocks)
   - **ASTAuditor**: Coordinates all analysis stages and provides detailed error reports
 
 ### 🚀 Code Merger Tool
 - **`scripts/advanced_merge.py`**: The comprehensive implementation with advanced AST analysis:
   - **Advanced scope analysis**: Full LEGB (Local, Enclosing, Global, Built-in) scope resolution
+    - **B1 Optimization**: O(1) scope lookup using `defnode_to_scope` hash mapping
   - **Symbol tracking**: Comprehensive tracking of all Python symbols (functions, classes, variables)
   - **Enhanced attribute resolution**: Supports nested attribute chains (e.g., `a.b.c.d`)
   - **Correct nonlocal/global handling**: Properly tracks and preserves scope declarations
   - **Import alias mapping**: Complete support for all import patterns and aliases
+    - **B2 Enhancement**: Adds `__mod` suffix to prevent runtime conflicts
   - **Main block deduplication**: Correctly handles module initialization statements
+  - **Topological sorting enhancements**:
+    - **B4 Fix**: Ensures classes are always output before their methods
 
 ### Example Code
 - **`examples/demo_packages/a_pkg/a.py`**: Contains `global_same()`, `hello()`, `hello2()` - demonstrates internal dependencies
