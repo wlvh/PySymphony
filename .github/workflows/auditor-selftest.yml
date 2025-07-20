@@ -1,0 +1,122 @@
+name: AST Auditor Self-Test
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'pysymphony/**'
+      - 'scripts/**'
+      - 'examples/**'
+      - '.github/workflows/auditor-selftest.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'pysymphony/**'
+      - 'scripts/**'
+      - 'examples/**'
+      - '.github/workflows/auditor-selftest.yml'
+
+jobs:
+  auditor-selftest:
+    name: Run AST Auditor on Project Code
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.8', '3.9', '3.10', '3.11', '3.12']
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements-dev.txt
+    
+    - name: Run AST Auditor on pysymphony package
+      run: |
+        echo "Auditing pysymphony package..."
+        python -c "
+import sys
+from pathlib import Path
+from pysymphony.auditor.auditor import ASTAuditor
+
+auditor = ASTAuditor()
+failed = False
+
+for py_file in Path('pysymphony').rglob('*.py'):
+    try:
+        source = py_file.read_text()
+        result = auditor.audit(source, str(py_file))
+        if not result:
+            print(f'❌ {py_file}: Failed audit')
+            print(auditor.get_report())
+            failed = True
+        else:
+            print(f'✓ {py_file}: Passed')
+    except Exception as e:
+        print(f'❌ {py_file}: Error during audit - {e}')
+        failed = True
+
+sys.exit(1 if failed else 0)
+        "
+    
+    - name: Run AST Auditor on scripts
+      run: |
+        echo "Auditing scripts..."
+        python -c "
+import sys
+from pathlib import Path
+from pysymphony.auditor.auditor import ASTAuditor
+
+auditor = ASTAuditor()
+failed = False
+
+for py_file in Path('scripts').rglob('*.py'):
+    try:
+        source = py_file.read_text()
+        result = auditor.audit(source, str(py_file))
+        if not result:
+            print(f'❌ {py_file}: Failed audit')
+            print(auditor.get_report())
+            failed = True
+        else:
+            print(f'✓ {py_file}: Passed')
+    except Exception as e:
+        print(f'❌ {py_file}: Error during audit - {e}')
+        failed = True
+
+sys.exit(1 if failed else 0)
+        "
+    
+    - name: Run AST Auditor on examples
+      run: |
+        echo "Auditing examples..."
+        python -c "
+import sys
+from pathlib import Path
+from pysymphony.auditor.auditor import ASTAuditor
+
+auditor = ASTAuditor()
+failed = False
+
+for py_file in Path('examples').rglob('*.py'):
+    try:
+        source = py_file.read_text()
+        result = auditor.audit(source, str(py_file))
+        if not result:
+            print(f'❌ {py_file}: Failed audit')
+            print(auditor.get_report())
+            failed = True
+        else:
+            print(f'✓ {py_file}: Passed')
+    except Exception as e:
+        print(f'❌ {py_file}: Error during audit - {e}')
+        failed = True
+
+sys.exit(1 if failed else 0)
+        "
