@@ -1796,9 +1796,13 @@ class AdvancedCodeMerger:
         修复：使用更精确的去重键，包含导入样式信息
         """
         result = []
+        # 添加别名去重集合，避免相同的别名被多次定义
+        seen_aliases = set()
         
         for imp in sorted(imports):
             # 解析导入语句
+            new_alias = None  # 初始化变量
+            
             if imp.startswith('from '):
                 # from X import Y as Z 或 from X import Y
                 parts = imp.split()
@@ -1817,9 +1821,11 @@ class AdvancedCodeMerger:
                     # from X import Y
                     module = parts[1]
                     name = parts[3]
+                    # B2 修复：即使没有别名，也要添加 __mod 后缀
+                    new_alias = f"{name}__mod"
+                    new_imp = f"from {module} import {name} as {new_alias}"
                     # Issue #37 修复：包含导入样式在去重键中
-                    key = ('from', module, name, name)
-                    new_imp = imp
+                    key = ('from', module, name, new_alias)
             else:
                 # import X as Y 或 import X
                 parts = imp.split()
@@ -1843,8 +1849,9 @@ class AdvancedCodeMerger:
                     # Issue #37 修复：包含导入样式在去重键中
                     key = ('import', module, new_alias)
             
-            # 检查是否已存在
-            if key not in self.import_registry:
+            # 检查是否已存在（包括别名去重）
+            if key not in self.import_registry and new_alias not in seen_aliases:
+                seen_aliases.add(new_alias)
                 self.import_registry.add(key)
                 result.append(new_imp)
         

@@ -95,6 +95,15 @@ class SymbolTableBuilder(ast.NodeVisitor):
         # 添加参数到函数作用域
         for arg in node.args.args:
             self.add_symbol(arg.arg, arg, 'variable')
+        # 添加 *args
+        if node.args.vararg:
+            self.add_symbol(node.args.vararg.arg, node.args.vararg, 'variable')
+        # 添加 **kwargs
+        if node.args.kwarg:
+            self.add_symbol(node.args.kwarg.arg, node.args.kwarg, 'variable')
+        # 添加仅关键字参数
+        for arg in node.args.kwonlyargs:
+            self.add_symbol(arg.arg, arg, 'variable')
         self.generic_visit(node)
         self.exit_scope()
         
@@ -102,7 +111,17 @@ class SymbolTableBuilder(ast.NodeVisitor):
         """访问异步函数定义"""
         self.add_symbol(node.name, node, 'function')
         self.enter_scope(node.name, 'function')
+        # 添加参数到函数作用域
         for arg in node.args.args:
+            self.add_symbol(arg.arg, arg, 'variable')
+        # 添加 *args
+        if node.args.vararg:
+            self.add_symbol(node.args.vararg.arg, node.args.vararg, 'variable')
+        # 添加 **kwargs
+        if node.args.kwarg:
+            self.add_symbol(node.args.kwarg.arg, node.args.kwarg, 'variable')
+        # 添加仅关键字参数
+        for arg in node.args.kwonlyargs:
             self.add_symbol(arg.arg, arg, 'variable')
         self.generic_visit(node)
         self.exit_scope()
