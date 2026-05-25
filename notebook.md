@@ -34,14 +34,14 @@ ANS_K = "insured_duns_number"
 # Conservative baseline:
 # premium_band may be generated after quote / underwriting decision,
 # so exclude it unless business confirms it is available pre-bound.
-DROP_PREMIUM_BAND = True
+DROP_PREMIUM_BAND = True # we may dont know how premium is before bound decision.
 
-MAX_CAT_CARDINALITY = 60
+MAX_CAT_CARDINALITY = 60 # id or one-hot
 NUMERIC_PARSE_THRESHOLD = 0.85
 
 VALID_FRACTION = 0.25
 
-STRICT_ASOF_HIDDEN_PREDICTION = True
+STRICT_ASOF_HIDDEN_PREDICTION = True # When predicting a hidden renewal date, training is only allowed using known bounded samples that have occurred before that date. 
 MIN_TRAIN_FOR_HIDDEN_MODEL = 80
 
 
@@ -449,7 +449,8 @@ def temporal_purged_split(known_df, val_fraction=0.25):
         train_mask = (
             (known_df["renew_dt"] < cutoff)
             & (~known_df["_k"].isin(val_keys))
-        )
+        ) # 1. The training set only use renewals before the validation set.
+          # 2. All DUNS that have appeared in the validation set should be removed.
 
         train_idx = known_df.index[train_mask]
         val_idx = known_df.index[val_mask]
@@ -764,6 +765,7 @@ train_idx, val_idx, cutoff = temporal_purged_split(
     known,
     val_fraction=VALID_FRACTION,
 )
+# Use the last 25% of the time interval as the validation set, the first 75% as training candidates. Then remove all DUNS that appeared in the validation set from the training candidates. No random split.
 
 train_y = m.loc[train_idx, "y"].astype(int)
 val_y = m.loc[val_idx, "y"].astype(int)
