@@ -269,9 +269,12 @@ def make_ohe():
 def choose_schema(df, candidate_cols, train_index):
     """
     Decide numeric vs categorical using training rows only.
-    This prevents schema decisions from looking at validation / hidden rows.
+
+    This version avoids pandas PerformanceWarning:
+    instead of inserting columns into X_all one by one,
+    it collects Series in a dict and builds the DataFrame once.
     """
-    X_all = pd.DataFrame(index=df.index)
+    col_data = {}
 
     numeric_cols = []
     categorical_cols = []
@@ -282,10 +285,13 @@ def choose_schema(df, candidate_cols, train_index):
     for c in candidate_cols:
         s = df[c]
 
+        # 1. Drop raw datetime columns.
+        # We already use derived date features like renew_year / renew_month.
         if pd.api.types.is_datetime64_any_dtype(s):
             dropped_reason[c] = "raw_datetime"
             continue
 
+        # 2. Native numeric / bool columns.
         if pd.api.types.is_numeric_dtype(s) or pd.api.types.is_bool_dtype(s):
             x = pd.to_numeric(s, errors="coerce").astype(float)
 
@@ -293,10 +299,12 @@ def choose_schema(df, candidate_cols, train_index):
                 dropped_reason[c] = "constant_numeric"
                 continue
 
-            X_all[c] = x
+            col_data[c] = x
             numeric_cols.append(c)
             continue
 
+        # 3. Object / string columns.
+        # First clean obvious missing tokens.
         txt = s.astype("string").str.strip()
         txt = txt.replace({
             "": pd.NA,
@@ -308,6 +316,8 @@ def choose_schema(df, candidate_cols, train_index):
             "<NA>": pd.NA,
         })
 
+        # Try to parse as numeric.
+        # This handles object columns that are actually numbers stored as strings.
         num_txt = (
             txt
             .str.replace(",", "", regex=False)
@@ -326,6 +336,8 @@ def choose_schema(df, candidate_cols, train_index):
         else:
             parse_rate = 0.0
 
+        # 4. If most non-null training values parse as numbers,
+        # treat the column as numeric.
         if parse_rate >= NUMERIC_PARSE_THRESHOLD:
             x = num.astype(float)
 
@@ -333,10 +345,11 @@ def choose_schema(df, candidate_cols, train_index):
                 dropped_reason[c] = "constant_after_numeric_parse"
                 continue
 
-            X_all[c] = x
+            col_data[c] = x
             numeric_cols.append(c)
             continue
 
+        # 5. Otherwise treat as categorical, but only if not too high-cardinality.
         card = train_txt.nunique(dropna=True)
 
         if card <= 1:
@@ -347,8 +360,16 @@ def choose_schema(df, candidate_cols, train_index):
             dropped_reason[c] = f"high_cardinality_{card}"
             continue
 
-        X_all[c] = txt.astype(object).where(txt.notna(), np.nan)
+        # Store categorical as object with np.nan for missing values,
+        # so SimpleImputer can handle it cleanly later.
+        col_data[c] = txt.astype(object).where(txt.notna(), np.nan)
         categorical_cols.append(c)
+
+    # Build the DataFrame once. This avoids DataFrame fragmentation.
+    if col_data:
+        X_all = pd.DataFrame(col_data, index=df.index).copy()
+    else:
+        X_all = pd.DataFrame(index=df.index)
 
     return X_all, numeric_cols, categorical_cols, dropped_reason
 
