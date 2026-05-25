@@ -654,6 +654,7 @@ for src in ["csad", "smad"]:
         & m["renew_dt"].notna()
         & (m[dt_col] <= m["renew_dt"])
     ).astype("int8")
+    # only use csad&smad features when their date <= renewal date
 
     protected = {dt_col, has_col, avail_col}
 
