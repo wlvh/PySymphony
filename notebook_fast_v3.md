@@ -26,9 +26,15 @@ ANS_K = "insured_duns_number"
 # Conservative: premium may be post-quote / post-underwriting. Exclude until confirmed.
 DROP_PREMIUM_BAND = True
 
-# Default: do not use hundreds of external payload columns.
-# Availability flags are still used.
-INCLUDE_EXTERNAL_PAYLOAD = False
+# Attach external payload as-of, but do not throw hundreds of raw fields into the model.
+# The selector below keeps only simple, high-completeness payload fields:
+#   1) binary, 2) numeric, 3) low-cardinality categoricals for one-hot.
+ATTACH_EXTERNAL_PAYLOAD = True
+INCLUDE_EXTERNAL_PAYLOAD = True
+EXTERNAL_MIN_COMPLETENESS = 0.90
+EXTERNAL_MIN_NONMISSING = 100
+EXTERNAL_MAX_OHE_CARDINALITY = 10
+EXTERNAL_SELECTION_REQUIRES_BOTH_SOURCES = True
 
 # Hidden prediction: train at most one final model.
 USE_SINGLE_FINAL_MODEL_FOR_HIDDEN = True
@@ -39,6 +45,7 @@ MIN_SAMPLE_PER_TRANSFORMED_FEATURE = 5.0
 VALID_FRACTION = 0.25
 MAX_CAT_CARDINALITY = 60
 NUMERIC_PARSE_THRESHOLD = 0.85
+EXTERNAL_NUMERIC_PARSE_THRESHOLD = NUMERIC_PARSE_THRESHOLD
 LOGISTIC_C_GRID = [0.01, 0.03, 0.1, 0.3, 1.0, 3.0]
 LOGISTIC_MAX_ITER = 1000
 
@@ -302,6 +309,237 @@ def print_dropped_summary(dropped_reason, title="Dropped feature summary", max_d
     print(detail.sort_values(["reason", "col"]).head(max_detail).to_string(index=False))
     return detail
 
+
+
+# ----------------------------
+# 1b. Guarded external payload feature selection
+# ----------------------------
+
+_EXTERNAL_MISSING_STRINGS = {
+    "", "nan", "none", "null", "<na>", "na", "n/a", "not available",
+    "unknown", "unk", ".", "-", "--",
+}
+
+_EXTERNAL_BAD_FEATURE_PATTERN = re.compile(
+    r"(?:^|_)(duns|filler|telephone|phone|fax|email|url|website|contact|"
+    r"business_name|company_name|insured_name|name|street|address|city|"
+    r"postal|zip|latitude|longitude|geo|ingest|file|filename|timestamp|"
+    r"as_of_date|datepll|arch_dte|date|dte)(?:_|$)",
+    flags=re.IGNORECASE,
+)
+
+_EXTERNAL_CODE_LIKE_PATTERN = re.compile(
+    r"(?:^|_)(sic|naics|code|class|type|status|rating|grade|category|cat)(?:_|$)",
+    flags=re.IGNORECASE,
+)
+
+
+def normalize_external_text(s):
+    """Normalize external payload values before completeness/type checks."""
+    txt = s.astype("string").str.strip()
+    miss = txt.str.lower().isin(_EXTERNAL_MISSING_STRINGS)
+    return txt.mask(miss, pd.NA)
+
+
+def parse_external_numeric_series(s):
+    """Parse common numeric string formats without treating missing tokens as zero."""
+    txt = normalize_external_text(s)
+    num_txt = (
+        txt.str.replace(",", "", regex=False)
+           .str.replace("$", "", regex=False)
+           .str.replace("%", "", regex=False)
+           .str.replace(r"^\((.*)\)$", r"-\1", regex=True)
+    )
+    return pd.to_numeric(num_txt, errors="coerce")
+
+
+def make_external_model_col_name(raw_col, kind, used_names):
+    safe = re.sub(r"[^0-9A-Za-z_]+", "_", str(raw_col)).strip("_")
+    base = f"ext_{kind}__{safe}"
+    out = base
+    i = 2
+    while out in used_names:
+        out = f"{base}__{i}"
+        i += 1
+    used_names.add(out)
+    return out
+
+
+def candidate_external_payload_cols(df, answer_feature_cols):
+    """Raw csad_/smad_ payload columns eligible for the guarded selector."""
+    drop_exact = {
+        "_row_id", "y", "bound", ANS_K, "_k", "renew_date", "renew_dt",
+        "broker", "subline", "insured_country", "region", "industry_group",
+        "premium_band", "in_appetite", "quarter", "year", "insured_name_scoring",
+    }
+    if DROP_PREMIUM_BAND:
+        drop_exact.add("premium_band_norm")
+
+    out = []
+    for c in df.columns:
+        if not (str(c).startswith("csad_") or str(c).startswith("smad_")):
+            continue
+        if c in drop_exact or c in answer_feature_cols:
+            continue
+        if c.endswith("_dt") or c.endswith("_raw_match") or c.endswith("_available_at_renewal"):
+            continue
+        if c.startswith("ext_"):
+            continue
+        if _EXTERNAL_BAD_FEATURE_PATTERN.search(str(c)):
+            continue
+        out.append(c)
+    return out
+
+
+def external_selection_index(df, train_index):
+    """Rows used to decide external feature quality; labels are not used."""
+    idx = pd.Index(train_index)
+    if not EXTERNAL_SELECTION_REQUIRES_BOTH_SOURCES:
+        return idx
+    needed = {"csad_available_at_renewal", "smad_available_at_renewal"}
+    if not needed.issubset(df.columns):
+        return idx
+    mask = (
+        df.loc[idx, "csad_available_at_renewal"].eq(1)
+        & df.loc[idx, "smad_available_at_renewal"].eq(1)
+    )
+    return idx[mask.to_numpy()]
+
+
+def add_selected_external_payload_features(df, candidate_cols, train_index, verbose=True):
+    """
+    Add derived external features selected on train rows only.
+
+    Rules:
+    - Selection universe defaults to train rows where both csad and smad are available as-of renewal.
+    - Keep only fields with >= EXTERNAL_MIN_COMPLETENESS and >= EXTERNAL_MIN_NONMISSING.
+    - Binary fields become numeric 0/1.
+    - Numeric fields stay numeric.
+    - Other fields are one-hot candidates only if train cardinality <= EXTERNAL_MAX_OHE_CARDINALITY.
+    - Everything else is dropped even if complete.
+    """
+    candidate_cols = [c for c in candidate_cols if c in df.columns]
+    select_idx = external_selection_index(df, train_index)
+    selected_data = {}
+    used_names = set(df.columns)
+    meta_rows = []
+    dropped_rows = []
+
+    if len(select_idx) == 0:
+        if verbose:
+            print("\nSelected external payload features:")
+            print("no selection rows; all external payload fields dropped")
+        return df.copy(), [], pd.DataFrame()
+
+    binary_map = {
+        "TRUE": 1, "T": 1, "YES": 1, "Y": 1, "1": 1,
+        "FALSE": 0, "F": 0, "NO": 0, "N": 0, "0": 0,
+    }
+
+    for c in candidate_cols:
+        txt_raw = normalize_external_text(df[c])
+        txt_fit = txt_raw.loc[select_idx]
+        raw_nonmissing_n = int(txt_fit.notna().sum())
+        completeness = raw_nonmissing_n / max(1, len(select_idx))
+
+        base = {
+            "raw_col": c,
+            "selection_rows": int(len(select_idx)),
+            "nonmissing_n": raw_nonmissing_n,
+            "completeness": float(completeness),
+        }
+
+        if raw_nonmissing_n < EXTERNAL_MIN_NONMISSING:
+            dropped_rows.append({**base, "reason": "too_few_nonmissing"})
+            continue
+        if completeness < EXTERNAL_MIN_COMPLETENESS:
+            dropped_rows.append({**base, "reason": "low_completeness"})
+            continue
+
+        # 1) Explicit binary values: yes/no, true/false, 1/0.
+        txt_upper = txt_raw.str.upper()
+        mapped = txt_upper.map(binary_map)
+        fit_nonmissing = txt_upper.loc[select_idx].notna()
+        mapped_rate = (
+            mapped.loc[select_idx][fit_nonmissing].notna().mean()
+            if fit_nonmissing.any() else 0.0
+        )
+        mapped_unique = int(mapped.loc[select_idx].nunique(dropna=True))
+        if mapped_rate >= 0.95 and mapped_unique == 2:
+            out_col = make_external_model_col_name(c, "bin", used_names)
+            selected_data[out_col] = mapped.astype(float)
+            meta_rows.append({**base, "selected_col": out_col, "kind": "binary_mapped", "parse_rate": mapped_rate, "cardinality": 2, "mapping": "FALSE/NO/0->0; TRUE/YES/1->1"})
+            continue
+
+        # 2) Numeric fields. Code-like numeric columns are safer as categoricals.
+        num = parse_external_numeric_series(df[c])
+        parse_rate = (
+            num.loc[select_idx][txt_fit.notna()].notna().mean()
+            if txt_fit.notna().any() else 0.0
+        )
+        numeric_unique = int(num.loc[select_idx].nunique(dropna=True))
+        code_like = bool(_EXTERNAL_CODE_LIKE_PATTERN.search(str(c)))
+
+        if parse_rate >= EXTERNAL_NUMERIC_PARSE_THRESHOLD and not code_like:
+            if numeric_unique <= 1:
+                dropped_rows.append({**base, "reason": "constant_numeric", "parse_rate": float(parse_rate), "cardinality": numeric_unique})
+                continue
+            if numeric_unique == 2:
+                vals = sorted(num.loc[select_idx].dropna().unique())
+                mapping = {vals[0]: 0.0, vals[1]: 1.0}
+                out_col = make_external_model_col_name(c, "bin", used_names)
+                selected_data[out_col] = num.map(mapping).astype(float)
+                meta_rows.append({**base, "selected_col": out_col, "kind": "binary_numeric", "parse_rate": float(parse_rate), "cardinality": 2, "mapping": f"{vals[0]}->0; {vals[1]}->1"})
+                continue
+            out_col = make_external_model_col_name(c, "num", used_names)
+            selected_data[out_col] = num.astype(float)
+            meta_rows.append({**base, "selected_col": out_col, "kind": "numeric", "parse_rate": float(parse_rate), "cardinality": numeric_unique})
+            continue
+
+        # 3) Generic two-level text becomes binary. Three-to-ten-level text becomes OHE.
+        txt_cat = txt_raw.str.lower()
+        fit_cat = txt_cat.loc[select_idx]
+        card = int(fit_cat.nunique(dropna=True))
+        if card <= 1:
+            dropped_rows.append({**base, "reason": "constant_categorical", "parse_rate": float(parse_rate), "cardinality": card})
+            continue
+        if card == 2:
+            vals = sorted(fit_cat.dropna().unique())
+            mapping = {vals[0]: 0.0, vals[1]: 1.0}
+            out_col = make_external_model_col_name(c, "bin", used_names)
+            selected_data[out_col] = txt_cat.map(mapping).astype(float)
+            meta_rows.append({**base, "selected_col": out_col, "kind": "binary_text", "parse_rate": float(parse_rate), "cardinality": 2, "mapping": f"{vals[0]}->0; {vals[1]}->1"})
+            continue
+        if card <= EXTERNAL_MAX_OHE_CARDINALITY:
+            out_col = make_external_model_col_name(c, "cat", used_names)
+            selected_data[out_col] = txt_cat.astype(object).where(txt_cat.notna(), np.nan)
+            meta_rows.append({**base, "selected_col": out_col, "kind": "categorical_ohe", "parse_rate": float(parse_rate), "cardinality": card})
+            continue
+
+        dropped_rows.append({**base, "reason": f"high_cardinality_{card}", "parse_rate": float(parse_rate), "cardinality": card})
+
+    selected_cols = list(selected_data.keys())
+    add_df = pd.DataFrame(selected_data, index=df.index) if selected_data else pd.DataFrame(index=df.index)
+    out_df = pd.concat([df.copy(), add_df], axis=1)
+    meta = pd.DataFrame(meta_rows)
+    dropped = pd.DataFrame(dropped_rows)
+
+    if verbose:
+        print("\nSelected external payload features:")
+        print(f"raw candidate cols: {len(candidate_cols)}")
+        print(f"selection rows: {len(select_idx)}")
+        print(f"selected derived cols: {len(selected_cols)}")
+        if len(meta):
+            print("Selected by kind:")
+            print(meta["kind"].value_counts().to_string())
+            display_or_print(meta.sort_values(["kind", "raw_col"]), n=80)
+        else:
+            print("none")
+        if len(dropped):
+            print("Dropped external candidates by reason:")
+            print(dropped["reason"].value_counts().head(30).to_string())
+
+    return out_df, selected_cols, meta
 
 def make_logistic_model(numeric_cols, categorical_cols, C):
     transformers = []
@@ -653,8 +891,8 @@ print(f"smad dt range: {smad0['dt'].min()} -- {smad0['dt'].max()} | parse_rate={
 print(f"csad duplicate key count before as-of: {csad0['_k'].duplicated().sum()}")
 print(f"smad duplicate key count before as-of: {smad0['_k'].duplicated().sum()}")
 
-csad_attach = asof_attach_source(ans0, csad0, prefix="csad", original_key_col=CSAD_K, include_payload=INCLUDE_EXTERNAL_PAYLOAD)
-smad_attach = asof_attach_source(ans0, smad0, prefix="smad", original_key_col=SMAD_K, include_payload=INCLUDE_EXTERNAL_PAYLOAD)
+csad_attach = asof_attach_source(ans0, csad0, prefix="csad", original_key_col=CSAD_K, include_payload=ATTACH_EXTERNAL_PAYLOAD)
+smad_attach = asof_attach_source(ans0, smad0, prefix="smad", original_key_col=SMAD_K, include_payload=ATTACH_EXTERNAL_PAYLOAD)
 
 m = (
     ans0
@@ -708,35 +946,18 @@ if not DROP_PREMIUM_BAND and "premium_band_norm" in m.columns:
     target_encode_cols.append("premium_band_norm")
 
 external_feature_cols = []
+external_selection_meta = pd.DataFrame()
+external_payload_candidate_cols = []
 if INCLUDE_EXTERNAL_PAYLOAD:
-    drop_exact = {
-        "_row_id", "y", "bound", ANS_K, "_k", "renew_date", "renew_dt",
-        "broker", "subline", "insured_country", "region", "industry_group",
-        "premium_band", "in_appetite", "quarter", "year", "insured_name_scoring",
-    }
-    if DROP_PREMIUM_BAND:
-        drop_exact.add("premium_band_norm")
-
-    bad_feature_pattern = re.compile(
-        r"(?:^|_)(duns|filler|telephone|phone|business_name|street_address|postal_code|zip_code|ingest|file_name|timestamp|as_of_date|datepll|arch_dte)(?:_|$)",
-        flags=re.IGNORECASE,
-    )
-    for c in m.columns:
-        if c in drop_exact or c in answer_feature_cols:
-            continue
-        if c.endswith("_dt"):
-            continue
-        if bad_feature_pattern.search(c):
-            continue
-        if c.startswith("csad_") or c.startswith("smad_"):
-            external_feature_cols.append(c)
+    external_payload_candidate_cols = candidate_external_payload_cols(m, answer_feature_cols)
 
 print("\nFeature set:")
 print(f"answer/availability features: {len(answer_feature_cols)}")
 print(answer_feature_cols)
 print(f"target-encoded columns: {target_encode_cols}")
-print(f"external payload features enabled: {INCLUDE_EXTERNAL_PAYLOAD}")
-print(f"external payload feature count: {len(external_feature_cols)}")
+print(f"external payload attached as-of: {ATTACH_EXTERNAL_PAYLOAD}")
+print(f"selected external payload enabled: {INCLUDE_EXTERNAL_PAYLOAD}")
+print(f"raw external payload candidate count before train-only selection: {len(external_payload_candidate_cols)}")
 print(f"DROP_PREMIUM_BAND = {DROP_PREMIUM_BAND}")
 
 
@@ -761,6 +982,18 @@ print(f"train date range: {m.loc[train_idx, 'renew_dt'].min()} -- {m.loc[train_i
 print(f"valid date range: {m.loc[val_idx, 'renew_dt'].min()} -- {m.loc[val_idx, 'renew_dt'].max()}")
 overlap_keys = set(m.loc[train_idx, "_k"].dropna()) & set(m.loc[val_idx, "_k"].dropna())
 print(f"overlapping DUNS keys train/valid: {len(overlap_keys)}")
+
+# Select external payload features after the split, using train rows only.
+if INCLUDE_EXTERNAL_PAYLOAD and external_payload_candidate_cols:
+    m, external_feature_cols, external_selection_meta = add_selected_external_payload_features(
+        m,
+        candidate_cols=external_payload_candidate_cols,
+        train_index=train_idx,
+        verbose=True,
+    )
+else:
+    external_feature_cols = []
+    external_selection_meta = pd.DataFrame()
 
 
 # ----------------------------
@@ -802,7 +1035,7 @@ if ADD_TARGET_ENCODING:
 else:
     X_te, num_te, cat_te, used_te, te_meta = None, [], [], [], pd.DataFrame()
 
-# Optional full external payload matrix.
+# Selected external payload matrix.
 if INCLUDE_EXTERNAL_PAYLOAD and external_feature_cols:
     full_cols = answer_feature_cols + external_feature_cols
     X_full, num_full, cat_full, drop_full, te_meta_full = build_feature_frame(
@@ -813,10 +1046,10 @@ if INCLUDE_EXTERNAL_PAYLOAD and external_feature_cols:
         target_encode_cols=target_encode_cols,
     )
     used_full = num_full + cat_full
-    print("\nFull external schema:")
+    print("\nSelected external schema:")
     print(f"numeric cols: {len(num_full)}")
     print(f"categorical cols: {len(cat_full)}")
-    print_dropped_summary(drop_full, title="Full external dropped summary")
+    print_dropped_summary(drop_full, title="Selected external dropped summary")
 else:
     X_full, num_full, cat_full, used_full = None, [], [], []
 
@@ -877,15 +1110,15 @@ if ADD_TARGET_ENCODING and X_te is not None and used_te:
         row["transformed_feature_count"] = transformed_feature_count(mdl, X_te.loc[train_idx, used_te])
         metrics_rows.append(row)
 
-# E. Optional full external logistic. One fit per C only if explicitly enabled.
+# E. Selected external logistic. One fit per C only if selected payload fields exist.
 if INCLUDE_EXTERNAL_PAYLOAD and X_full is not None and used_full:
     for C in LOGISTIC_C_GRID:
-        label = f"full_external_logistic_C={C}"
+        label = f"selected_external_logistic_C={C}"
         mdl = make_logistic_model(num_full, cat_full, C=C)
         mdl.fit(X_full.loc[train_idx, used_full], train_y)
         p = mdl.predict_proba(X_full.loc[val_idx, used_full])[:, 1]
         val_predictions[label] = p
-        model_specs[label] = {"type": "logistic", "feature_mode": "full", "C": C}
+        model_specs[label] = {"type": "logistic", "feature_mode": "selected_external", "C": C}
         row = safe_metrics(val_y, p, label)
         row["transformed_feature_count"] = transformed_feature_count(mdl, X_full.loc[train_idx, used_full])
         metrics_rows.append(row)
@@ -1072,10 +1305,16 @@ else:
                 add_te=True,
                 target_encode_cols=target_encode_cols,
             )
-        elif feature_mode == "full" and INCLUDE_EXTERNAL_PAYLOAD:
-            full_cols = answer_feature_cols + external_feature_cols
-            X_final, num_final, cat_final, drop_final, te_meta_final = build_feature_frame(
+        elif feature_mode == "selected_external" and INCLUDE_EXTERNAL_PAYLOAD:
+            m_final_ext, external_feature_cols_final, external_selection_meta_final = add_selected_external_payload_features(
                 m,
+                candidate_cols=external_payload_candidate_cols,
+                train_index=final_train_idx,
+                verbose=True,
+            )
+            full_cols = answer_feature_cols + external_feature_cols_final
+            X_final, num_final, cat_final, drop_final, te_meta_final = build_feature_frame(
+                m_final_ext,
                 base_candidate_cols=full_cols,
                 train_index=final_train_idx,
                 add_te=ADD_TARGET_ENCODING,
